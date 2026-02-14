@@ -1,4 +1,4 @@
-﻿# 模块2：Embedding与位置编码
+# 模块2：Embedding与位置编码
 
 > 嵌入是连接离散符号与连续计算的桥梁。词嵌入将离散的词元映射到连续向量空间，位置编码则赋予模型感知序列顺序的能力。本章将深入嵌入的数学原理，重点讲解旋转位置编码的推导与实现。
 
@@ -770,6 +770,7 @@ $$\theta_i' = \theta_i \cdot s^{2(i-1)/d}$$
 | **PaLM** | RoPE | 同Llama |
 | **MPT** | ALiBi | 线性偏置，超长外推 |
 | **BLOOM** | ALiBi | 同MPT |
+| **Claude** | 未公开（推测RoPE） | 200K长上下文支持 |
 
 ### 7.1 为什么RoPE成为主流？
 
@@ -788,6 +789,51 @@ $$c_{KV} = W_{DKV} h_t$$
 在计算注意力时，需要先上投影恢复KV，然后应用RoPE。
 
 关键技巧：将RoPE放在上投影之后，避免位置编码被压缩。
+
+### 7.3 Anthropic的嵌入研究
+
+Anthropic在嵌入空间的**可解释性**研究方面做出了重要贡献，深刻影响了我们对词嵌入的理解。
+
+#### Superposition假设
+
+**核心发现**（Elhage et al., 2022 - *Toy Models of Superposition*）：
+
+神经网络在有限维度的嵌入空间中，可以编码**远超维度数量**的特征。
+
+**数学描述**：
+
+设嵌入维度为 $d$，特征数量为 $n$，当 $n > d$ 时：
+- 特征并非按正交基排列
+- 而是以**近似正交**的方式叠加（Superposition）
+- 稀疏特征（出现频率低的特征）更容易被叠加
+
+$$\text{表示容量} \gg d \quad (\text{当特征稀疏时})$$
+
+**几何直觉**：
+
+```mermaid
+graph LR
+    subgraph "正交表示 (n ≤ d)"
+        A1[特征1 → 维度1]
+        A2[特征2 → 维度2]
+        A3[特征3 → 维度3]
+    end
+
+    subgraph "叠加表示 (n >> d)"
+        B1[多个特征共享维度]
+        B2[近似正交排列]
+        B3[稀疏特征可恢复]
+    end
+```
+
+**对教程的意义**：
+
+这一发现解释了为什么：
+1. 词嵌入能在低维空间中捕捉丰富的语义信息
+2. 嵌入维度不必等于特征数量
+3. 理解嵌入空间的几何结构对理解模型行为至关重要
+
+> **详细内容**请参阅 [advanced.md](./advanced.md) 中 Anthropic 可解释性研究部分。
 
 ---
 
@@ -879,105 +925,127 @@ class TransformerEmbedding(nn.Module):
 
 ---
 
-## 9. 练习项目
+## 9. 项目实践
 
-### 9.1 项目目标
+> 以下项目按难度递增排列。项目采用**开放式设计**，只提供思路和关键引导。
 
-实现并比较不同位置编码的效果。
+### 项目1：Word2Vec 从零实现（★☆☆ 入门）
 
-### 9.2 任务
+**目标**：实现 Skip-Gram + Negative Sampling，理解词嵌入训练过程。
 
-1. 实现Sinusoidal、RoPE、ALiBi三种位置编码
-2. 在简单的序列预测任务上比较效果
-3. 测试外推能力
+**任务**：
+1. 实现 Skip-Gram 模型（中心词 → 上下文词）
+2. 实现 Negative Sampling 优化
+3. 在小语料上训练，观察嵌入空间的语义性质
+4. 可视化：用 t-SNE/PCA 展示词向量聚类
 
-### 9.3 代码框架
-
+**关键代码片段**：
 ```python
-"""
-位置编码比较实验
-"""
+class SkipGram(nn.Module):
+    def __init__(self, vocab_size, embed_dim):
+        super().__init__()
+        self.center_embed = nn.Embedding(vocab_size, embed_dim)
+        self.context_embed = nn.Embedding(vocab_size, embed_dim)
 
-import torch
-import torch.nn as nn
-import matplotlib.pyplot as plt
+    def forward(self, center, context, neg_samples):
+        # 正样本得分: sigmoid(u_o^T v_c)
+        center_v = self.center_embed(center)      # [batch, dim]
+        context_u = self.context_embed(context)    # [batch, dim]
+        pos_score = torch.sigmoid((center_v * context_u).sum(dim=-1))
 
+        # 负样本得分
+        neg_u = self.context_embed(neg_samples)    # [batch, K, dim]
+        neg_score = torch.sigmoid(-(center_v.unsqueeze(1) * neg_u).sum(dim=-1))
 
-class PositionalEncodingComparison:
-    """
-    比较不同位置编码的效果
-    """
-    
-    def __init__(self, d_model=256, n_heads=8, max_seq_len=512):
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.max_seq_len = max_seq_len
-    
-    def test_extrapolation(self, model, train_len=128, test_lens=[256, 512, 1024]):
-        """
-        测试外推能力
-        
-        训练长度为train_len，测试更长的序列
-        """
-        results = {}
-        
-        for test_len in test_lens:
-            # 生成测试数据
-            x = torch.randn(1, test_len, self.d_model)
-            
-            try:
-                with torch.no_grad():
-                    output = model(x)
-                results[test_len] = {
-                    'success': True,
-                    'output_shape': output.shape
-                }
-            except Exception as e:
-                results[test_len] = {
-                    'success': False,
-                    'error': str(e)
-                }
-        
-        return results
-    
-    def visualize_position_encoding(self, encoding_fn, name: str, max_len: int = 100):
-        """
-        可视化位置编码
-        """
-        pe = encoding_fn(max_len, self.d_model)
-        
-        plt.figure(figsize=(12, 4))
-        plt.imshow(pe.T, aspect='auto', cmap='RdBu')
-        plt.colorbar()
-        plt.xlabel('Position')
-        plt.ylabel('Dimension')
-        plt.title(f'{name} Positional Encoding')
-        plt.show()
-        
-        # 可视化相似度矩阵
-        similarity = pe @ pe.T
-        plt.figure(figsize=(8, 6))
-        plt.imshow(similarity, cmap='viridis')
-        plt.colorbar()
-        plt.xlabel('Position')
-        plt.ylabel('Position')
-        plt.title(f'{name} Position Similarity')
-        plt.show()
-
-
-if __name__ == "__main__":
-    comparison = PositionalEncodingComparison()
-    
-    # 可视化位置编码
-    comparison.visualize_position_encoding(
-        sinusoidal_positional_encoding,
-        "Sinusoidal"
-    )
-    
-    # 测试外推能力
-    print("测试外推能力...")
-    # ... 实验代码
+        loss = -torch.log(pos_score + 1e-8).mean() - torch.log(neg_score + 1e-8).mean()
+        return loss
 ```
+
+**预期产出**：训练好的词嵌入 + t-SNE 可视化图 + 类比推理测试（king - man + woman ≈ queen）。
+
+---
+
+### 项目2：词嵌入可视化与类比推理（★★☆ 进阶）
+
+**目标**：深入探索嵌入空间的几何性质，理解为什么词嵌入能捕捉语义。
+
+**任务**：
+1. 加载预训练词向量（GloVe 或 Word2Vec）
+2. 实现类比推理：$\vec{king} - \vec{man} + \vec{woman} \approx \vec{queen}$
+3. 探索嵌入空间的线性结构：
+   - 性别方向：man-woman, king-queen, he-she
+   - 时态方向：walk-walked, run-ran
+   - 国家-首都方向
+4. 分析：线性结构在多大程度上成立？局限性在哪？
+
+**评估方法**：
+- 类比精度：Top-1 / Top-5 / Top-10 准确率
+- 余弦相似度分布：同类词 vs 异类词
+- 聚类质量：轮廓系数（Silhouette Score）
+
+**预期产出**：嵌入空间几何分析报告 + 多维度可视化图表。
+
+---
+
+### 项目3：RoPE vs ALiBi 长度外推实验（★★★ 挑战）
+
+**目标**：通过实验对比 RoPE 和 ALiBi 的长度外推能力。
+
+**任务**：
+1. 实现一个小型 Transformer 模型，支持切换 RoPE / ALiBi
+2. 在固定长度（如128 tokens）上训练
+3. 在更长序列（256, 512, 1024, 2048）上测试：
+   - 困惑度变化
+   - 注意力模式可视化
+   - 位置敏感度分析
+4. 测试 RoPE 插值方法（Position Interpolation, NTK-aware）
+
+**实验设计**：
+
+```mermaid
+graph TB
+    A[训练: 128 tokens] --> B1[测试: 256 tokens]
+    A --> B2[测试: 512 tokens]
+    A --> B3[测试: 1024 tokens]
+    A --> B4[测试: 2048 tokens]
+
+    B1 --> C[对比指标]
+    B2 --> C
+    B3 --> C
+    B4 --> C
+
+    C --> D1[困惑度曲线]
+    C --> D2[注意力热力图]
+    C --> D3[位置敏感度]
+```
+
+**控制变量**：
+- 模型架构相同（仅位置编码不同）
+- 训练数据和超参数相同
+- 评估数据相同
+
+**预期产出**：外推能力定量对比报告 + 注意力模式可视化。
+
+---
+
+### 项目4：自定义位置编码方案设计（★★★ 挑战）
+
+**目标**：设计一种新的位置编码方案，尝试结合 RoPE 和 ALiBi 的优势。
+
+**任务**：
+1. 分析 RoPE 和 ALiBi 的核心优势和局限：
+   - RoPE：精确的相对位置感知，但外推需要插值
+   - ALiBi：完美外推，但线性偏置可能过于简单
+2. 设计一种混合方案（例如：低维用 RoPE + 高维用 ALiBi）
+3. 实现并在简单任务上验证
+4. 分析：你的方案在哪些场景更好？代价是什么？
+
+**思路引导**：
+- 考虑不同维度使用不同的位置编码策略
+- 考虑频率依赖的衰减机制
+- 参考 YaRN 的多尺度思想
+
+**预期产出**：新方案的数学形式 + 实现 + 对比实验 + 分析报告。
 
 ---
 
@@ -1012,6 +1080,9 @@ if __name__ == "__main__":
 2. Su et al. (2021). *RoFormer: Enhanced Transformer with Rotary Position Embedding*.
 3. Press et al. (2022). *Train Short, Test Long: Attention with Linear Biases*.
 4. Sun et al. (2022). *A Length-Extrapolatable Transformer*.
+5. Elhage et al. (2022). *Toy Models of Superposition*. Anthropic.
+6. Mikolov et al. (2013). *Efficient Estimation of Word Representations in Vector Space*.
+7. Pennington et al. (2014). *GloVe: Global Vectors for Word Representation*.
 
 ### 博客
 
