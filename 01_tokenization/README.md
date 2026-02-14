@@ -1,4 +1,4 @@
-﻿# 模块1：Tokenization——从文本到词元
+# 模块1：Tokenization——从文本到词元
 
 > 分词是LLM的第一道门：将连续的文本流切分为离散的词元序列。这看似简单的操作，却深刻影响着模型的词汇量、序列长度、泛化能力和推理效率。本章将深入分词算法的数学原理，并从零实现工业级分词器。
 
@@ -14,7 +14,7 @@
 - [6. SentencePiece：Google的工业实践](#6-sentencepiecegoogle的工业实践)
 - [7. 现代LLM的分词策略](#7-现代llm的分词策略)
 - [8. 从零实现BPE分词器](#8-从零实现bpe分词器)
-- [9. 练习项目：训练自定义Tokenizer](#9-练习项目训练自定义tokenizer)
+- [9. 项目实践](#9-项目实践)
 
 ---
 
@@ -154,6 +154,22 @@ BPE最初是一种数据压缩算法，2016年被Sennrich等人引入NLP领域�
 **输入**：语料库 $\mathcal{C} = \{s_1, s_2, \ldots, s_N\}$
 
 **输出**：词汇表 $V$ 和合并规则 $R$
+
+**算法流程**：
+
+```mermaid
+graph TB
+    A[语料库] --> B[Step 1: 切分为字符序列]
+    B --> C[Step 2: 统计相邻对频率]
+    C --> D{还有可合并的对?}
+    D -->|是| E[Step 3: 选择最高频对]
+    E --> F[Step 4: 合并为新词元]
+    F --> G[更新词汇表和合并规则]
+    G --> H{达到目标词汇量?}
+    H -->|否| C
+    H -->|是| I[输出: 词汇表V + 合并规则R]
+    D -->|否| I
+```
 
 **算法流程**：
 
@@ -629,8 +645,32 @@ UNK_ID = 2      # <unk>
 | **Llama 3** | Tiktoken | 128,000 | 更大词汇量 |
 | **DeepSeek** | SentencePiece (BPE) | ~100,000 | 中英优化 |
 | **Gemma** | SentencePiece | 256,000 | 大词汇量 |
+| **Claude** | 类Tiktoken | ~100,000 | 多语言优化、长上下文 |
 
-### 7.2 DeepSeek的分词设计
+### 7.2 三条技术线的分词策略
+
+```mermaid
+graph TB
+    subgraph "Google"
+        G1[SentencePiece框架] --> G2[T5: Unigram 32K]
+        G2 --> G3[Gemma: SentencePiece 256K]
+        G3 --> G4[超大词汇表策略]
+    end
+
+    subgraph "DeepSeek"
+        D1[SentencePiece BPE] --> D2[~100K词汇量]
+        D2 --> D3[中英文平衡优化]
+        D3 --> D4[代码分词专门处理]
+    end
+
+    subgraph "Anthropic"
+        A1[类Tiktoken] --> A2[~100K词汇量]
+        A2 --> A3[多语言覆盖]
+        A3 --> A4[长上下文优化]
+    end
+```
+
+### 7.3 DeepSeek的分词设计
 
 DeepSeek针对中英双语场景优化了分词器：
 
@@ -653,7 +693,7 @@ Llama 2: ['这', '是', '一个', '中文', '句子', '，', '用于', '测试',
 DeepSeek: ['这是一个中文句子', '，', '用于测试分词效果', '。'] (4 tokens)
 ```
 
-### 7.3 Llama 3的Tiktoken
+### 7.4 Llama 3的Tiktoken
 
 Llama 3采用了OpenAI的Tiktoken分词器：
 
@@ -671,7 +711,29 @@ Llama 2: ~0.7 tokens/word (英文)
 Llama 3: ~0.5 tokens/word (英文)
 ```
 
-### 7.4 词汇量选择
+### 7.5 Anthropic Claude的分词策略
+
+Claude使用基于Byte-level BPE的分词器（类似Tiktoken），具有以下特点：
+
+**可观测特征**（基于API行为分析）：
+
+1. **词汇量**：约100,000
+2. **多语言支持**：对中文、日文等CJK语言有良好的压缩率
+3. **代码优化**：常见编程语言关键词和语法结构被优先编码
+4. **长上下文适配**：分词效率直接影响200K上下文窗口的实用性
+
+**Token计费与分词的商业关系**：
+
+分词粒度直接影响API使用成本。更高的压缩率意味着：
+- 同样的文本消耗更少的Token
+- 更长的有效上下文窗口
+- 更低的推理成本
+
+$$\text{有效上下文} = \frac{\text{上下文窗口(tokens)}}{\text{压缩率(tokens/char)}}$$
+
+> **注意**：Claude的分词器具体实现未公开。以上分析基于API的可观测行为，部分内容为合理推测，已标注。
+
+### 7.6 词汇量选择
 
 词汇量的权衡：
 
@@ -997,214 +1059,158 @@ class ByteBPETokenizer(BPETokenizer):
 
 ---
 
-## 9. 练习项目：训练自定义Tokenizer
+## 9. 项目实践
 
-### 9.1 项目目标
+> 以下项目按难度递增排列。项目采用**开放式设计**，只提供思路和关键引导，鼓励读者独立实现。
 
-为综合项目训练一个专用的中英双语分词器。
+### 项目1：BPE分词器训练与可视化（★☆☆ 入门）
 
-### 9.2 数据准备
+**目标**：使用本章代码训练BPE分词器，并可视化合并过程。
 
+**任务**：
+1. 在给定语料上训练BPE分词器，记录每轮合并的词元对和频率
+2. 绘制词汇表大小随合并轮数的增长曲线
+3. 绘制Top-10最高频合并对的频率柱状图
+4. 对比不同`vocab_size`（100, 500, 1000, 5000）下的分词结果
+
+**思路提示**：
+- 修改 `train()` 方法，在每轮合并时记录 `(轮次, 合并对, 频率, 新词元)`
+- 使用 `matplotlib` 绘制图表
+- 观察：随着合并进行，词元粒度如何从字符级向词级演变
+
+**关键代码片段**：
 ```python
-"""
-准备训练数据
-"""
-
-import json
-from datasets import load_dataset
-
-
-def prepare_corpus(output_path: str, max_samples: int = 100000):
-    """
-    准备分词器训练语料
-    
-    数据来源：
-    1. TinyStories（英文）
-    2. 中文维基百科
-    3. 代码数据（可选）
-    """
-    texts = []
-    
-    # TinyStories英文数据
-    print("加载TinyStories...")
-    tinystories = load_dataset("roneneldan/TinyStories", split="train")
-    for i, item in enumerate(tinystories):
-        if i >= max_samples // 2:
-            break
-        texts.append(item['text'])
-    
-    # 中文数据（这里用示例，实际可用维基百科）
-    print("加载中文数据...")
-    # 示例：使用其他开源中文数据集
-    # chinese_data = load_dataset("...")
-    
-    # 保存
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for text in texts:
-            f.write(text + '\n')
-    
-    print(f"语料准备完成，共 {len(texts)} 条文本")
-
-
-if __name__ == "__main__":
-    prepare_corpus("corpus.txt", max_samples=100000)
+# 记录合并历史
+merge_history = []
+for i in range(num_merges):
+    best_pair = max(pairs, key=pairs.get)
+    merge_history.append({
+        'step': i,
+        'pair': best_pair,
+        'freq': pairs[best_pair],
+        'new_token': best_pair[0] + best_pair[1],
+        'vocab_size': len(self.vocab)
+    })
 ```
 
-### 9.3 训练脚本
+**预期产出**：合并过程的可视化图表 + 不同词汇量的对比分析报告。
 
+---
+
+### 项目2：多算法分词对比实验（★★☆ 进阶）
+
+**目标**：对比BPE、WordPiece、Unigram LM三种算法在同一语料上的表现差异。
+
+**任务**：
+1. 在同一语料上分别训练三种分词器（词汇量相同）
+2. 对比以下指标：
+   - 压缩率（chars/token）
+   - 词汇表利用率
+   - OOV处理能力
+   - 分词一致性（同一词在不同上下文中的分词结果是否一致）
+3. 分析各算法的优缺点
+
+**实验框架**：
 ```python
-"""
-使用SentencePiece训练分词器
-"""
+def compare_tokenizers(corpus, test_texts, vocab_size=8000):
+    """对比实验框架"""
+    results = {}
 
-import sentencepiece as spm
+    # 1. 训练BPE
+    bpe = BPETokenizer()
+    bpe.train(corpus, vocab_size)
+    results['BPE'] = evaluate(bpe, test_texts)
 
+    # 2. 训练WordPiece（需自行实现或使用HuggingFace）
+    # wp = WordPieceTokenizer()
+    # ...
 
-def train_tokenizer(
-    corpus_path: str,
-    model_prefix: str,
-    vocab_size: int = 32000,
-    model_type: str = 'bpe'
-):
-    """
-    训练SentencePiece分词器
-    
-    Args:
-        corpus_path: 语料文件路径
-        model_prefix: 模型前缀
-        vocab_size: 词汇量
-        model_type: 'bpe' 或 'unigram'
-    """
-    spm.SentencePieceTrainer.train(
-        input=corpus_path,
-        model_prefix=model_prefix,
-        vocab_size=vocab_size,
-        model_type=model_type,
-        
-        # 字符覆盖率
-        character_coverage=0.9995,
-        
-        # 特殊token
-        pad_id=0,
-        unk_id=1,
-        bos_id=2,
-        eos_id=3,
-        pad_piece='<pad>',
-        unk_piece='<unk>',
-        bos_piece='<s>',
-        eos_piece='</s>',
-        
-        # Byte fallback：支持任意Unicode字符
-        byte_fallback=True,
-        
-        # 其他参数
-        normalization_rule_name='nmt_nfkc',
-        add_dummy_prefix=True,
-        remove_extra_whitespaces=False,
-        
-        # 训练参数
-        num_threads=4,
-        input_sentence_size=1000000,
-        shuffle_input_sentence=True,
-    )
-    
-    print(f"训练完成！模型保存在 {model_prefix}.model")
+    # 3. 训练Unigram（使用SentencePiece）
+    # sp = train_sentencepiece(corpus, vocab_size, model_type='unigram')
+    # ...
 
-
-def test_tokenizer(model_path: str):
-    """测试分词器"""
-    sp = spm.SentencePieceProcessor()
-    sp.load(model_path)
-    
-    # 测试文本
-    test_texts = [
-        "Hello, this is a test.",
-        "这是一个中文测试。",
-        "The quick brown fox jumps over the lazy dog.",
-        "人工智能正在改变世界。",
-        "def hello_world():\n    print('Hello, World!')",
-    ]
-    
-    print("="*50)
-    print("分词器测试")
-    print("="*50)
-    print(f"词汇表大小: {sp.get_piece_size()}")
-    print()
-    
-    for text in test_texts:
-        tokens = sp.encode(text, out_type=str)
-        ids = sp.encode(text, out_type=int)
-        decoded = sp.decode(ids)
-        
-        print(f"原文: {text}")
-        print(f"词元: {tokens}")
-        print(f"ID: {ids}")
-        print(f"解码: {decoded}")
-        print(f"压缩率: {len(text)/len(tokens):.2f} chars/token")
-        print("-"*50)
-
-
-if __name__ == "__main__":
-    # 训练
-    train_tokenizer(
-        corpus_path="corpus.txt",
-        model_prefix="my_tokenizer",
-        vocab_size=32000,
-        model_type="bpe"
-    )
-    
-    # 测试
-    test_tokenizer("my_tokenizer.model")
+    # 4. 对比
+    compare_results(results)
 ```
 
-### 9.4 评估指标
+**评估指标**：
+| 指标 | 计算方式 | 含义 |
+|------|----------|------|
+| 压缩率 | `len(text) / len(tokens)` | 每个token平均覆盖的字符数 |
+| 词汇利用率 | `used_tokens / vocab_size` | 测试集中实际使用的词汇比例 |
+| 分词粒度方差 | `var(token_lengths)` | 分词粒度的均匀程度 |
 
-```python
-"""
-分词器评估
-"""
+**预期产出**：三种算法的定量对比表格 + 定性分析报告。
 
-def evaluate_tokenizer(model_path: str, test_corpus: list):
-    """
-    评估分词器质量
-    
-    指标：
-    1. 压缩率：chars/token
-    2. OOV率：未登录词比例
-    3. 词汇表利用率
-    """
-    sp = spm.SentencePieceProcessor()
-    sp.load(model_path)
-    
-    total_chars = 0
-    total_tokens = 0
-    vocab_usage = set()
-    
-    for text in test_corpus:
-        total_chars += len(text)
-        ids = sp.encode(text, out_type=int)
-        total_tokens += len(ids)
-        vocab_usage.update(ids)
-    
-    # 计算指标
-    compression_ratio = total_chars / total_tokens
-    vocab_utilization = len(vocab_usage) / sp.get_piece_size()
-    
-    print("="*50)
-    print("分词器评估报告")
-    print("="*50)
-    print(f"词汇表大小: {sp.get_piece_size()}")
-    print(f"压缩率: {compression_ratio:.2f} chars/token")
-    print(f"词汇表利用率: {vocab_utilization:.2%}")
-    print(f"平均序列长度: {total_tokens / len(test_corpus):.2f} tokens")
-    
-    return {
-        'vocab_size': sp.get_piece_size(),
-        'compression_ratio': compression_ratio,
-        'vocab_utilization': vocab_utilization,
-        'avg_seq_length': total_tokens / len(test_corpus)
-    }
+---
+
+### 项目3：中文分词器从零训练（★★★ 挑战）
+
+**目标**：针对中文文本训练一个高质量的子词分词器，深入理解中文分词的特殊挑战。
+
+**任务**：
+1. 收集中文语料（维基百科 / 新闻 / 小说，至少10MB）
+2. 分析中文BPE的特殊性：
+   - 中文无天然词边界（无空格）
+   - UTF-8编码下每个汉字占3字节
+   - Byte-level BPE与字符级BPE在中文上的差异
+3. 训练中文分词器，调优 `character_coverage` 和 `vocab_size`
+4. 对比与jieba/pkuseg等传统中文分词工具的差异
+
+**思路引导**：
+- 中文的一个关键问题：BPE在字符级别操作时，初始词汇表已经包含数千个汉字
+- Byte-level BPE会将汉字先拆为3个UTF-8字节，再合并——这对中文效率更低
+- 考虑使用 `character_coverage=0.9995` 确保覆盖绝大多数汉字
+- 词汇量建议范围：32K-64K
+
+**关键问题**：
+1. 对于 "人工智能"，分词器学到的是 "人工" + "智能" 还是 "人" + "工" + "智" + "能"？
+2. 词汇量对中文分词效果的影响是否与英文一致？
+3. 如何量化评估中文分词的"语义完整性"？
+
+**预期产出**：训练好的中文分词器 + 中文分词特性分析报告。
+
+---
+
+### 项目4：分词器对下游任务影响分析（★★★ 挑战）
+
+**目标**：通过实验验证分词策略对模型性能的影响，理解"分词是LLM第一道门"的深层含义。
+
+**任务**：
+1. 使用不同分词器（不同算法 / 不同词汇量）对同一数据集进行分词
+2. 在分词后的数据上训练简单的语言模型（如2层Transformer）
+3. 对比不同分词策略下的：
+   - 训练loss收敛速度
+   - 下游任务准确率（如文本分类）
+   - 生成质量（困惑度）
+
+**实验设计思路**：
+
+```mermaid
+graph TB
+    A[同一语料] --> B1[分词器A: vocab=8K]
+    A --> B2[分词器B: vocab=32K]
+    A --> B3[分词器C: vocab=128K]
+
+    B1 --> C1[训练模型A]
+    B2 --> C2[训练模型B]
+    B3 --> C3[训练模型C]
+
+    C1 --> D[对比评估]
+    C2 --> D
+    C3 --> D
+
+    D --> D1[训练收敛速度]
+    D --> D2[生成困惑度]
+    D --> D3[下游任务精度]
 ```
+
+**控制变量**：
+- 模型架构完全相同（仅Embedding层大小随词汇量变化）
+- 训练数据完全相同（仅分词方式不同）
+- 训练超参数相同
+
+**预期产出**：定量实验结果 + "分词对模型性能影响"的深度分析报告。
 
 ---
 
