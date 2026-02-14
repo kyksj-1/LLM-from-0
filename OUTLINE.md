@@ -1,6 +1,6 @@
 # LLM 从零到一完整教程 — 总体规划大纲
 
-> **目标读者**: 具备反向传播、神经网络、微积分、线性代数、概率统计基础，但编程能力薄弱的大学生
+> **目标读者**: 具备反向传播、神经网络、微积分、线性代数、概率统计基础，同时渴望提高编程和工程能力的大学生
 > **技术主线**: Google · DeepSeek · Anthropic 三条线贯穿
 > **文档结构**: 每个模块 `README.md`（核心理论+代码+项目） + `advanced.md`（前沿工业实践）
 > **代码规范**: PyTorch 为主，按逻辑职责拆分为独立 `.py` 文件，放置于 `code/{模块名}/`
@@ -18,7 +18,9 @@
 - [模块 5: 注意力机制进阶 — MHA/MQA/GQA/MLA](#模块-5-注意力机制进阶--mhamqagqamla)
 - [模块 6: MoE — 混合专家模型](#模块-6-moe--混合专家模型)
 - [模块 7: 数据工程 — 预训练数据管线](#模块-7-数据工程--预训练数据管线)
-- [模块 8: 预训练 — 目标函数与Scaling Laws](#模块-8-预训练--目标函数与scaling-laws)
+- [模块 8A: 预训练（上）— 目标函数与理论基础](#模块-8a-预训练上--目标函数与理论基础)
+- [模块 8B: 预训练（中）— Scaling Laws 与计算最优](#模块-8b-预训练中--scaling-laws-与计算最优)
+- [模块 8C: 预训练（下）— 训练工程与实战](#模块-8c-预训练下--训练工程与实战)
 - [模块 9: 分布式训练 — 并行策略与工程优化](#模块-9-分布式训练--并行策略与工程优化)
 - [模块 10: SFT — 监督微调与参数高效微调](#模块-10-sft--监督微调与参数高效微调)
 - [模块 11: RLHF — 基于人类反馈的强化学习](#模块-11-rlhf--基于人类反馈的强化学习)
@@ -687,89 +689,103 @@ code/data_engineering/
 
 ---
 
-## 模块 8: 预训练 — 目标函数与 Scaling Laws
+## 模块 8A: 预训练（上）— 目标函数与理论基础
 
 ### README.md
 
-#### 1. 语言模型的训练目标
-- Next Token Prediction (NTP)
-  - 交叉熵损失：$L = -\frac{1}{T}\sum_{t=1}^T \log P(x_t | x_{<t})$
-  - 与 perplexity 的关系：$\text{PPL} = \exp(L)$
-  - 为什么 NTP 足以产生智能？信息论视角
+#### 1. 语言模型的训练目标：Next Token Prediction
+- 交叉熵损失：$L = -\frac{1}{T}\sum_{t=1}^T \log P(x_t | x_{<t})$
+- 与 perplexity 的关系：$\text{PPL} = \exp(L)$
+- Teacher Forcing 与自回归训练的数学框架
+- Softmax 瓶颈：当词汇表巨大时的计算挑战
 
-#### 2. Scaling Laws（缩放法则）
-- **Kaplan et al. (2020)**: OpenAI Scaling Laws
-  - 损失与参数量 N、数据量 D、计算量 C 的幂律关系
-  - $L(N) = (N_c/N)^{\alpha_N}$, $L(D) = (D_c/D)^{\alpha_D}$
-  - 最优分配：固定 C 下如何分配 N 和 D
-- **Chinchilla (2022)**: 修正 Scaling Laws
-  - Kaplan 的偏差：过拟合大模型、欠训练数据
-  - Chinchilla 最优：$N_{opt} \propto C^{0.5}$, $D_{opt} \propto C^{0.5}$
-  - 对工业实践的深远影响
-- **DeepSeek 的 Scaling Laws 实践**
-  - 小模型实验 → 大模型预测的方法论
-  - MoE 模型的 Scaling Laws 特殊性
+#### 2. 为什么 NTP 足以产生智能？
+- 信息论视角：预测下一个词 ≈ 压缩数据
+- 压缩即智能（Compression = Intelligence）：
+  - Solomonoff 归纳推理的直觉
+  - Kolmogorov 复杂性与最短描述长度（MDL）
+  - Hutter Prize 的启示：压缩能力与智能的正相关
+- Shannon 熵与语言的可预测性
+- 从"统计鹦鹉"到"涌现理解"的哲学讨论
 
-#### 3. 训练策略
-- 学习率调度：Warmup + Cosine Decay
-  - 数学公式与直觉解释
-  - WSD（Warmup-Stable-Decay）调度
-- 权重初始化：$\mu$P（maximal update parameterization）
-- 梯度裁剪与训练稳定性
-- 批大小调度：逐步增大 batch size
+#### 3. 其他预训练目标
+- **MLM（Masked Language Modeling）— BERT 系列**:
+  - 随机遮蔽 15% token 的策略（80/10/10 规则）
+  - 双向上下文的优势与自回归不兼容的劣势
+  - 数学形式：$L_{MLM} = -\sum_{i \in M} \log P(x_i | x_{\backslash M})$
+- **Prefix LM — T5/PaLM 系列**:
+  - 前缀部分双向注意力 + 后缀部分因果注意力
+  - 统一 NLU 与 NLG 的数学框架
+- **UL2（Unifying Language Learning Paradigms）**:
+  - 混合去噪器（Mixture-of-Denoisers）
+  - R-Denoiser / S-Denoiser / X-Denoiser 的设计
+  - Mode Switching Token 的创新
+- **Fill-in-the-Middle（FIM）**:
+  - 代码模型的关键目标（StarCoder, CodeLlama, DeepSeek-Coder）
+  - PSM（Prefix-Suffix-Middle）vs SPM（Suffix-Prefix-Middle）格式
+  - FIM rate 的选择（通常 50%-90%）
+  - 数学形式与 NTP 的兼容性
+- **去噪目标（Denoising Objectives）**:
+  - Span Corruption（T5 风格）
+  - 噪声类型：删除、替换、插入、排列
+- **各目标的统一对比表（Mermaid 表格）**:
+  - 上下文方向、适用任务、训练效率、与 NTP 的兼容性
 
-#### 4. 工程鲁棒性：断点续训（Checkpointing）
-- **为什么需要 Checkpoint**:
-  - 硬件故障是常态：训练数周的模型不能因单点故障而重头再来
-  - 容错与恢复（Fault Tolerance & Recovery）
-- **保存什么？（State Dict 的解剖）**:
-  - 模型权重（Model Weights）
-  - 优化器状态（Optimizer States）：Momentum, Variance (占据大部分显存)
-  - 学习率调度器状态（LR Scheduler）：`last_epoch`
-  - 随机数种子（RNG States）：确保数据增强和 Dropout 的可复现性
-- **实现策略**:
-  - 频率控制：按 Step 保存 vs 按 Epoch 保存
-  - 轮换机制（Rotation）：保留最近 N 个 checkpoints，防止磁盘写满
-  - 原子写入（Atomic Write）：防止在写入过程中崩溃导致文件损坏
-  - **实战代码**: 实现 `save_checkpoint()` 和 `load_checkpoint()` 并在训练循环中集成
+#### 4. Perplexity 的理论与实践
+- PPL 的信息论含义：每 token 的平均选择数（$2^H$）
+- PPL 的局限性：不同分词器下不可直接比较
+- **Bits-per-byte（BPB）**: 更公平的跨分词器度量
+  - 计算方法：$\text{BPB} = \frac{L \times T}{\text{total\_bytes}} / \ln 2$
+- Perplexity 与下游任务性能的关系：近似线性？
 
-#### 5. 训练监控
-- 损失曲线解读
-- 梯度范数监控
-- 训练不稳定（loss spikes）的诊断与处理
-- 评估指标：PPL、下游任务 benchmark
+#### 5. 损失函数设计细节
+- **Label Smoothing**:
+  - 公式：$L_{LS} = (1-\alpha) L_{CE} + \alpha L_{uniform}$
+  - 正则化效果与校准性改善
+- **Z-loss（PaLM 使用）**:
+  - Logit 归一化惩罚：$L_z = c \cdot \log^2 Z$
+  - 防止 logit 漂移的工程意义
+- **Auxiliary Losses 在预训练中的角色**:
+  - MoE 负载均衡损失（回顾模块 6，衔接）
+  - 路由器 z-loss
+
+#### 6. 三条技术线的预训练目标选择
+- **Google**: BERT(MLM) → T5(Prefix LM + Span Corruption) → PaLM(NTP) → Gemma(NTP)
+  - 为什么最终回归 NTP？工程简洁性与 Scaling 表现
+- **DeepSeek**: NTP 为主 + FIM 用于代码能力 + 辅助损失 free
+- **Anthropic**: 预训练目标与安全性的关系，安全数据比例的考量
 
 ### advanced.md
 
-#### 1. Google 的预训练实践
-- PaLM 的训练细节（6144 TPU v4）
-- 训练中的 loss spike 处理经验
-- Gemma 的训练配置公开细节
+#### 1. Google 的预训练目标研究
+- 从 BERT 到 UL2 的探索历程
+- PaLM 的 Z-loss 实践经验
+- Gemini 的多模态预训练目标
 
-#### 2. DeepSeek 的训练工程
-- FP8 混合精度训练（DeepSeek-V3）
-- 训练不稳定性的工程解决方案
-- MoE 训练的特殊挑战
+#### 2. DeepSeek 的预训练目标策略
+- FIM 在 DeepSeek-Coder 中的应用
+- 代码预训练与通用预训练的目标设计差异
+- DeepSeek-V3 的预训练目标配置
 
 #### 3. Anthropic 视角
-- Anthropic 的 Scaling Laws 研究贡献
-- 预训练与安全性的关系
-- "Scaling is predictable" 的方法论意义
+- 预训练阶段的安全性考量
+- 目标函数设计如何影响模型的"价值观"
+- Anthropic 对预训练 vs 后训练的安全投入分配
 
 #### 4. 前沿话题
-- 超越 Chinchilla：Llama 3 的过度训练策略
-- μP 与超参数迁移
-- 预训练目标函数的变体探索
+- 多模态预训练目标（图文交织训练）
+- 预训练目标的自动搜索
+- Token 级别的自适应损失加权
+- 预训练目标与模型涌现能力的关系
 
-### 代码目录 `code/pretraining/`
+### 代码目录 `code/pretraining_objectives/`
 
 ```
-code/pretraining/
-├── objectives.py             # NTP 损失函数实现
-├── lr_scheduler.py           # 学习率调度器（Cosine, WSD 等）
-├── scaling_laws.py           # Scaling Laws 拟合与预测工具
-├── trainer.py                # 简化预训练训练器
-├── monitoring.py             # 训练监控工具
+code/pretraining_objectives/
+├── ntp_loss.py               # NTP 损失 + Label Smoothing + Z-loss
+├── mlm_loss.py               # MLM 损失实现
+├── fim_loss.py               # Fill-in-the-Middle 实现
+├── perplexity.py             # PPL / BPB 计算与对比工具
 └── utils.py                  # 工具函数
 ```
 
@@ -777,10 +793,370 @@ code/pretraining/
 
 | # | 项目名称 | 难度 | 提供内容 | 核心目标 |
 |---|---------|------|---------|---------|
-| 1 | 在小语料上训练一个 mini-LM（单GPU） | ⭐⭐ 进阶 | 训练框架代码 + 超参数指引 | 体验完整预训练流程 |
-| 2 | 拟合自己的 Scaling Laws 曲线 | ⭐⭐ 进阶 | 实验设计 + 拟合代码 + 可视化模板 | 理解缩放法则 |
-| 3 | 对比不同学习率调度的训练效果 | ⭐⭐ 进阶 | 调度器代码 + 实验对比框架 | 理解训练策略 |
-| 4 | 从 Scaling Laws 预测大模型性能 | ⭐⭐⭐ 挑战 | 数学推导 + 预测方法论 | 掌握 Scaling Laws 应用 |
+| 1 | 实现 NTP + Label Smoothing + Z-loss 训练循环 | ⭐ 入门 | 完整代码 + 详细注释 | 理解预训练损失函数 |
+| 2 | 对比 NTP/MLM/Prefix LM 在小语料上的表现 | ⭐⭐ 进阶 | 实验设计 + 关键代码 + 评估方法 | 理解不同目标的特性 |
+| 3 | 实现 Fill-in-the-Middle 并验证代码补全能力 | ⭐⭐ 进阶 | 数据格式说明 + 核心代码片段 | 理解 FIM 在代码模型中的作用 |
+| 4 | 分析 PPL 与 BPB 在不同分词器下的差异 | ⭐⭐⭐ 挑战 | 分析框架 + 数学推导提示 | 理解评估指标的深层含义 |
+
+---
+
+## 模块 8B: 预训练（中）— Scaling Laws 与计算最优
+
+### README.md
+
+#### 1. Scaling Laws 基础：幂律关系
+- 经验发现：LLM 性能遵循可预测的幂律
+- 幂律在物理学中的普遍性（类比直觉）
+- 三个核心变量：参数量 N、数据量 D、计算量 C
+
+#### 2. Kaplan et al.（2020）: OpenAI Scaling Laws
+- 损失与 N 的关系：$L(N) = (N_c/N)^{\alpha_N}$，$\alpha_N \approx 0.076$
+- 损失与 D 的关系：$L(D) = (D_c/D)^{\alpha_D}$，$\alpha_D \approx 0.095$
+- 损失与 C 的关系：$L(C) = (C_c/C)^{\alpha_C}$
+- 最优分配的 Lagrange 乘子法推导：
+  - 固定 C 下，$N_{opt} \propto C^{0.73}$, $D_{opt} \propto C^{0.27}$
+  - 结论："优先扩大模型，数据其次"
+- 原始实验的关键设置与潜在问题
+
+#### 3. Chinchilla（2022）: 修正 Scaling Laws
+- Kaplan 的偏差分析：
+  - 未训练至收敛 → 低估数据的重要性
+  - 学习率调度依赖训练步数 → 引入混淆变量
+- Chinchilla 三种估计方法：
+  - 方法 1: 固定模型，变数据量
+  - 方法 2: 固定 FLOPs，变 N/D 分配
+  - 方法 3: 参数化损失函数拟合
+- Chinchilla 最优：$N_{opt} \propto C^{0.5}$, $D_{opt} \propto C^{0.5}$
+  - 核心修正：模型和数据应等比例扩大
+- 对工业实践的深远影响：从"大模型少数据"到"平衡扩展"
+
+#### 4. 过度训练（Over-training）策略
+- **为什么要过度训练？**:
+  - 推理成本 vs 训练成本的经济学分析
+  - 小模型过度训练 → 推理更便宜
+  - Llama 3 的实践：8B 模型用 15T tokens（远超 Chinchilla 最优）
+- **过度训练的理论支撑**:
+  - 损失在 Chinchilla 最优之后仍在下降，只是效率降低
+  - 过度训练的 Scaling Laws：$L(N, rD_{opt})$ 的预测公式
+- **何时选择过度训练？** 决策框架（Mermaid 决策图）
+
+#### 5. MoE 模型的 Scaling Laws
+- 总参数量 vs 激活参数量的 Scaling 行为
+- 稀疏模型与稠密模型的 Scaling Laws 差异
+- DeepSeek 的 MoE Scaling Laws 实验方法
+  - 小规模 MoE 实验 → 预测大规模 MoE 性能
+  - 专家数量、粒度、激活比例对 Scaling 的影响
+- MoE 的"有效参数量"概念
+
+#### 6. 涌现能力（Emergent Abilities）与相变
+- 涌现能力的定义：小模型没有、大模型突然具备的能力
+- 经典案例：算术推理、CoT、多步推理
+- **争论：是真正的相变还是评估指标的假象？**
+  - Schaeffer et al.（2023）: 非线性度量造成的错觉
+  - 连续度量下能力可能是平滑增长
+  - 当前共识与未解问题
+- 下游任务的 Scaling Laws：Benchmark 性能 vs 预训练 loss
+
+#### 7. 计算最优配置的工程实践
+- **小模型实验 → 大模型预测**（DeepSeek 方法论）:
+  - 实验设计：模型规模梯度（70M → 300M → 1B → 3B）
+  - 拟合方法：最小二乘 + 贝叶斯优化
+  - 预测的可靠性与置信区间
+- **muP（Maximal Update Parameterization）**:
+  - 核心思想：使不同宽度模型有相似的训练动力学
+  - 从小模型调参 → 直接迁移到大模型
+  - 数学基础：参数更新的规模不变性
+  - 与标准参数化（SP）的对比
+- **训练成本估算**:
+  - FLOPs → GPU-hours → 美元的转换
+  - $C \approx 6PD$ 的推导与适用条件
+  - 实际 MFU（Model FLOPs Utilization）的影响
+
+### advanced.md
+
+#### 1. Google 的 Scaling 研究
+- Kaplan → Chinchilla 的自我修正历程
+- PaLM 的 Scaling 分析（540B 参数）
+- Gemini 的 Scaling 策略（推测+公开信息）
+
+#### 2. DeepSeek 的 Scaling Laws 实践
+- DeepSeek-V2/V3 的小模型 proxy 实验
+- MoE Scaling Laws 的实验细节
+- 开源 Scaling Laws 数据的价值
+
+#### 3. Anthropic 的 Scaling 贡献
+- Anthropic 的 Scaling Laws 研究贡献
+- "Scaling is predictable" 的方法论意义
+- Scaling 预测在安全规划中的应用
+
+#### 4. 前沿话题
+- 超越幂律：是否存在 Scaling Laws 的极限？
+- Inference-time Compute Scaling（与模块 13 CoT 衔接）
+- Scaling Laws 的理论解释尝试（统计力学视角）
+- 数据质量的 Scaling Laws：高质量数据是否有不同的 Scaling 曲线？
+- Chinchilla 之后的 Scaling 研究综述
+
+### 代码目录 `code/scaling_laws/`
+
+```
+code/scaling_laws/
+├── scaling_laws.py           # Scaling Laws 拟合与预测工具
+├── chinchilla_optimal.py     # Chinchilla 最优配置计算器
+├── flops_calculator.py       # 模型 FLOPs / 训练成本估算
+├── visualization.py          # Scaling 曲线可视化
+└── utils.py                  # 工具函数
+```
+
+### 项目实践
+
+| # | 项目名称 | 难度 | 提供内容 | 核心目标 |
+|---|---------|------|---------|---------|
+| 1 | 在小模型上拟合自己的 Scaling Laws 曲线 | ⭐⭐ 进阶 | 实验设计 + 拟合代码 + 可视化模板 | 理解缩放法则的经验性 |
+| 2 | 实现 Chinchilla 最优计算器 | ⭐⭐ 进阶 | 数学推导 + 计算器框架代码 | 掌握计算最优分配 |
+| 3 | 从 Scaling Laws 预测大模型性能 | ⭐⭐⭐ 挑战 | 数学推导 + 预测方法论 + 置信区间分析 | 掌握 Scaling Laws 工程应用 |
+| 4 | 分析涌现能力：连续度量 vs 离散度量 | ⭐⭐⭐ 挑战 | 论文关键结论 + 实验设计思路 | 理解涌现的本质争论 |
+
+---
+
+## 模块 8C: 预训练（下）— 训练工程与实战
+
+### README.md
+
+#### 1. 优化器深入：AdamW
+- **Adam 回顾**:
+  - 一阶矩估计（动量）：$m_t = \beta_1 m_{t-1} + (1-\beta_1) g_t$
+  - 二阶矩估计（自适应学习率）：$v_t = \beta_2 v_{t-1} + (1-\beta_2) g_t^2$
+  - 偏差修正：$\hat{m}_t = m_t / (1-\beta_1^t)$
+  - 更新规则：$\theta_t = \theta_{t-1} - \eta \hat{m}_t / (\sqrt{\hat{v}_t} + \epsilon)$
+- **AdamW：Weight Decay vs L2 正则化的本质区别**:
+  - L2 正则化：将惩罚加入梯度 → 与自适应学习率耦合
+  - Weight Decay：直接缩减权重 → 解耦（Mermaid 对比图）
+  - 数学证明：在标准 SGD 下等价，在 Adam 下不等价
+- **优化器状态的显存分析**:
+  - Adam 状态：2× 模型参数（$m_t$ + $v_t$）
+  - FP32 精度下：模型 $P$ 参数 → 优化器占 $8P$ 字节
+  - 总显存公式（模型 + 梯度 + 优化器）
+- **超参数选择原则**:
+  - $\beta_1 = 0.9$（通用默认）
+  - $\beta_2$：0.95（GPT-3）vs 0.999（原始 Adam）— 原因分析
+  - $\epsilon$：1e-8（默认）vs 1e-6（某些训练更稳定）
+  - Weight Decay：通常 0.1，与学习率的交互
+- **其他优化器简介**:
+  - Adafactor：节省显存（不存储完整二阶矩）
+  - LION（符号梯度）：更新方向只取 sign
+  - 8-bit Adam（bitsandbytes）：量化优化器状态
+
+#### 2. 学习率调度策略
+- **Warmup + Cosine Decay**:
+  - Warmup 的理论依据：初始梯度不稳定
+  - Cosine 衰减：$\eta_t = \eta_{min} + \frac{1}{2}(\eta_{max} - \eta_{min})(1 + \cos(\pi t / T))$
+  - Warmup 步数的经验选择（通常 0.1%-1% 总步数）
+- **WSD（Warmup-Stable-Decay）调度**:
+  - MiniCPM / DeepSeek-V3 使用
+  - 三阶段：Warmup → 恒定学习率 → 快速衰减
+  - 优势：可灵活决定何时停止训练
+  - 与 Cosine 调度的训练曲线对比
+- **退火阶段（Cooldown / Annealing）**:
+  - 训练末期切换高质量数据 + 降低学习率
+  - Llama 3 的数据退火实践
+  - 退火对最终性能的提升量化
+- **学习率与 Batch Size 的关系**:
+  - 线性缩放法则（Linear Scaling Rule）：$\eta \propto B$
+  - 平方根缩放：$\eta \propto \sqrt{B}$
+  - 临界批大小（Critical Batch Size）的概念
+
+#### 3. 权重初始化
+- **标准初始化方法**:
+  - Xavier/Glorot 初始化：$W \sim U[-\sqrt{6/(n_{in}+n_{out})}, \sqrt{6/(n_{in}+n_{out})}]$
+  - He/Kaiming 初始化：适配 ReLU 的方差分析
+  - 截断正态分布初始化
+- **残差分支的缩放**:
+  - GPT-2 风格：输出投影乘以 $1/\sqrt{N_{layers}}$
+  - 防止残差路径的方差随深度增长
+- **muP 初始化**:
+  - 使不同宽度模型有相似的训练动力学
+  - 初始化规则 + 学习率规则的联合调整
+  - 从小模型调参 → 直接迁移到大模型
+
+#### 4. 梯度管理
+- **梯度裁剪（Gradient Clipping）**:
+  - L2 范数裁剪：$g = g \cdot \min(1, \frac{c}{\|g\|_2})$
+  - 裁剪阈值的选择（通常 1.0）
+  - 梯度裁剪的频率与训练稳定性
+- **梯度累积**:
+  - 模拟大 batch size：$g_{eff} = \frac{1}{K}\sum_{k=1}^K g_k$
+  - 等价于大 batch 训练的数学证明
+  - 实现注意事项（loss 的归一化位置）
+  - （与模块 9 分布式训练衔接）
+- **梯度范数监控**:
+  - 梯度范数作为训练健康度指标
+  - 突然增大 → 可能的训练不稳定
+  - 各层梯度范数的分布分析
+
+#### 5. Batch Size 策略
+- 固定 batch size vs 逐步增大（Batch Size Warmup）
+- 批大小与学习率的协同调整
+- 临界批大小（Critical Batch Size）：
+  - 定义：梯度噪声 vs 梯度信号的平衡点
+  - $B_{crit} = B_{noise} / L$ 的推导
+  - 低于临界大小 → 增大 B 几乎不浪费计算
+  - 高于临界大小 → 增大 B 回报递减
+- DeepSeek-V3 的 batch size 调度实践
+
+#### 6. 训练稳定性专题
+- **Loss Spikes 的根因分析**（Mermaid 决策树）:
+  - **数据异常**: 异常样本、数据损坏、编码错误
+  - **数值精度**: FP16 溢出（$>65504$）、梯度爆炸
+  - **学习率过大**: 超出当前 loss landscape 的稳定区间
+  - **批次方差**: 极端 mini-batch 的偶然影响
+- **PaLM 的 Loss Spike 处理经验**:
+  - 从 spike 前 100 步的 checkpoint 重启
+  - 跳过导致 spike 的数据批次
+  - 200-500 次 spike 的工程代价
+- **训练发散的诊断流程**（Mermaid 决策树）:
+  - Step 1: 检查梯度范数 → 是否爆炸？
+  - Step 2: 检查 logit 范围 → 是否 NaN/Inf？
+  - Step 3: 检查数据 → 是否有异常样本？
+  - Step 4: 回退学习率 → 是否超出稳定范围？
+- **数值精度与训练稳定性**:
+  - FP16 vs BF16 vs FP32 的精度-稳定性权衡
+  - BF16 的优势：动态范围大，不易溢出
+  - FP8 训练（DeepSeek-V3）的额外挑战
+  - （详细的混合精度训练实现见模块 9）
+- **梯度爆炸/消失**:
+  - 深度网络的梯度传播分析
+  - Pre-Norm 的稳定性优势（回顾模块 3）
+  - 残差连接对梯度流的保护作用
+
+#### 7. 断点续训（Checkpointing）与容错
+- **为什么需要 Checkpoint**:
+  - 硬件故障是常态：训练数周的模型不能因单点故障重头再来
+  - 预训练成本与容错的经济学分析
+- **State Dict 的完整解剖**:
+  - 模型权重（Model Weights）
+  - 优化器状态（Optimizer States）：Momentum, Variance（占大部分显存）
+  - 学习率调度器状态（LR Scheduler）
+  - 随机数种子（RNG States）：确保数据增强与 Dropout 的可复现性
+  - 数据加载器状态（Dataloader State）：已消费的 sample 位置
+  - 训练步数 / epoch 计数
+- **实现策略**:
+  - 频率控制：按 Step 保存 vs 按时间保存
+  - 轮换机制（Rotation）：保留最近 N 个 checkpoints
+  - 原子写入（Atomic Write）：防止写入过程中崩溃导致文件损坏
+  - 异步保存：不阻塞训练循环
+- **断点重连（Fault Recovery）**:
+  - 精确恢复：所有状态完全恢复 → 训练完全可重现
+  - 数据重放的处理：恢复后不重复已消费数据
+  - 分布式训练的 checkpoint 特殊处理（与模块 9 衔接）
+- **实战代码**: `save_checkpoint()` / `load_checkpoint()` 的完整实现
+
+#### 8. 训练监控与评估
+- **损失曲线解读**:
+  - 正常训练曲线的特征：平滑下降 + 逐渐减速
+  - 异常模式：震荡、突升、平台期
+  - 不同阶段的学习行为
+- **梯度与权重监控**:
+  - 梯度范数：各层分布、时间变化
+  - 权重范数：是否持续增长？
+  - 参数更新比率：$\|\Delta W\| / \|W\|$
+- **训练中的评估**:
+  - 验证集 PPL 的周期性计算
+  - 下游任务 few-shot 评估（定期抽样）
+  - 评估频率的工程权衡
+- **工具实践**: WandB / TensorBoard 的最佳实践
+
+#### 9. 多阶段预训练
+- **标准预训练 → 继续预训练（Continual Pre-training）**:
+  - 动机：领域适配（医疗、法律、金融）
+  - 灾难性遗忘的风险与缓解策略
+  - 数据混合：通用 + 领域的比例
+- **长上下文扩展预训练**:
+  - 从 4K → 128K 的上下文窗口扩展
+  - RoPE 基底频率的调整（ABF）
+  - 长文本数据的收集与质量控制
+  - 训练配置：更小的 batch size、更多的梯度累积
+- **数据退火（Data Annealing / Cooldown）**:
+  - 训练末期切换高质量数据
+  - 学习率同步降低
+  - Llama 3 / MiniCPM 的退火实践
+  - 退火数据的选择标准
+- **代码能力的分阶段注入**:
+  - 何时加入代码数据？预训练初期 vs 后期
+  - 代码数据比例对通用能力的影响
+
+#### 10. MoE 预训练的特殊工程挑战（与模块 6 衔接）
+- **路由器训练不稳定性**:
+  - 训练早期路由器的随机性
+  - 路由器与专家的协同进化
+- **负载均衡的动态调整**:
+  - 辅助损失系数的调参策略
+  - DeepSeek-V3 的辅助损失 free 策略
+  - Token dropping 策略在预训练中的应用
+- **MoE 模型的显存特殊性**:
+  - 总参数量大 → 优化器状态的显存挑战
+  - Expert Parallelism 的必要性（指向模块 9）
+- **MoE 预训练的超参数选择**:
+  - 专家数量、激活比例的配置
+  - 与 Dense 模型超参数的差异
+
+#### 11. 三条技术线的训练工程实践
+- **Google**:
+  - PaLM：6144 TPU v4 的训练经验
+  - Loss spike 处理：跳过 + 重启策略
+  - Gemma 的训练配置公开细节
+- **DeepSeek**:
+  - FP8 混合精度训练的工程突破（DeepSeek-V3）
+  - DualPipe 计算-通信重叠（指向模块 9 详解）
+  - MoE 训练的稳定性工程
+- **Anthropic**:
+  - 大规模训练的安全考量
+  - 训练过程中的异常检测机制
+  - 训练可重复性的工程保证
+
+### advanced.md
+
+#### 1. Google 的大规模训练工程
+- PaLM 训练的全流程复盘
+- Gemma 的训练配置与经验
+- TPU 训练的特殊工程考量
+
+#### 2. DeepSeek 的训练工程创新
+- FP8 训练的完整技术细节
+- MoE 训练的稳定性保障机制
+- 多阶段训练的数据策略
+
+#### 3. Anthropic 视角
+- 训练过程中的安全监控
+- 训练异常与模型行为的关联
+- 大规模训练的可重复性挑战
+
+#### 4. 前沿话题
+- 弹性训练（Elastic Training）：节点动态加入/退出
+- 在线学习与持续预训练
+- 训练过程的可重复性研究
+- 绿色 AI：训练的碳排放与能效优化
+
+### 代码目录 `code/training_engineering/`
+
+```
+code/training_engineering/
+├── optimizer.py              # AdamW 从零实现 + 8-bit Adam 简化版
+├── lr_scheduler.py           # Cosine / WSD / 多阶段调度器
+├── checkpointing.py          # 完整 checkpoint 保存/恢复实现
+├── trainer.py                # 预训练训练器（整合以上组件）
+├── monitoring.py             # 训练监控工具（损失/梯度/权重追踪）
+├── stability_diagnosis.py    # 训练稳定性诊断工具
+└── utils.py                  # 工具函数
+```
+
+### 项目实践
+
+| # | 项目名称 | 难度 | 提供内容 | 核心目标 |
+|---|---------|------|---------|---------|
+| 1 | 在小语料上训练一个 mini-LM（完整训练循环） | ⭐⭐ 进阶 | 训练框架代码 + 超参数指引 | 体验完整预训练流程 |
+| 2 | 对比不同学习率调度的训练效果（Cosine vs WSD） | ⭐⭐ 进阶 | 调度器代码 + 实验对比框架 | 理解学习率策略 |
+| 3 | 实现完整的 Checkpoint 保存/恢复并验证可重复性 | ⭐⭐ 进阶 | 核心代码 + 验证方法 | 掌握训练鲁棒性工程 |
+| 4 | 模拟并诊断训练不稳定性（人造 loss spike） | ⭐⭐⭐ 挑战 | 诊断框架 + 注入异常的方法 | 理解训练调试方法论 |
 
 ---
 
@@ -1545,7 +1921,7 @@ code/advanced_topics/
 
 ### Version A: 300M 参数（单 GPU 版本）
 
-**目标**: 在单张 24GB GPU 上完成全流程
+**目标**: 在服务器单张 24GB GPU 上完成全流程（进阶：local单张 8GB GPU上完成）
 
 #### 架构配置
 | 参数 | 值 |
@@ -1711,12 +2087,25 @@ code/
 │   ├── data_mixer.py
 │   ├── pipeline.py
 │   └── analysis.py
-├── pretraining/               # 模块 8
-│   ├── objectives.py
-│   ├── lr_scheduler.py
+├── pretraining_objectives/    # 模块 8A
+│   ├── ntp_loss.py
+│   ├── mlm_loss.py
+│   ├── fim_loss.py
+│   ├── perplexity.py
+│   └── utils.py
+├── scaling_laws/              # 模块 8B
 │   ├── scaling_laws.py
+│   ├── chinchilla_optimal.py
+│   ├── flops_calculator.py
+│   ├── visualization.py
+│   └── utils.py
+├── training_engineering/      # 模块 8C
+│   ├── optimizer.py
+│   ├── lr_scheduler.py
+│   ├── checkpointing.py
 │   ├── trainer.py
 │   ├── monitoring.py
+│   ├── stability_diagnosis.py
 │   └── utils.py
 ├── distributed/               # 模块 9
 │   ├── data_parallel.py
@@ -1847,32 +2236,90 @@ code/
 
 #### 执行方式
 
-**1. 使用子代理（Sub-agents）并行编写**
+**1. 使用子代理（Sub-agents）+ Git Worktree 并行编写**
 
-每个模块的工作量大（README.md ~400行 + advanced.md ~300行 + 代码文件），适合用 Task 工具的子代理并行处理。推荐分组：
+每个模块的工作量大（README.md ~400行 + advanced.md ~300行 + 代码文件），适合用 Task 工具的子代理并行处理。**使用 Git Worktree 实现真正的并行隔离**。
+
+##### 1.1 Git Worktree 工作流
+
+由于所有子代理共享同一个文件系统，同一个 Git 仓库同一时刻只能 checkout 一个分支。为了让多个子代理各自独立地 `git add` / `git commit`，采用 `git worktree` 方案：
+
+```bash
+# 主 Agent（Orchestrator）在主仓库目录执行：
+# 为每个模块创建独立的 worktree 目录 + 分支
+git worktree add ../LLM-m04 -b feat/module-04
+git worktree add ../LLM-m05 -b feat/module-05
+git worktree add ../LLM-m06 -b feat/module-06
+# ...依次创建到 module-16
+
+# 验证
+git worktree list
+```
+
+**目录结构示意：**
+```
+D:\Repos\LLM learning\      ← 主 worktree（feat/basic-components 分支）
+D:\Repos\LLM-m04\           ← Agent-4 的独立工作目录（feat/module-04 分支）
+D:\Repos\LLM-m05\           ← Agent-5 的独立工作目录（feat/module-05 分支）
+...
+D:\Repos\LLM-m16\           ← Agent-16 的独立工作目录（feat/module-16 分支）
+```
+
+**每个子代理在自己的 worktree 目录中：**
+- 拥有完整的仓库文件副本
+- 在自己的分支上独立工作
+- 自由执行 `git add` / `git commit`，不会与其他代理冲突
+- 遵循 `Git Workflow.md` 中的所有规范
+
+**全部完成后，主 Agent 执行合并与清理：**
+```bash
+# 回到主 worktree
+cd "D:\Repos\LLM learning"
+
+# 逐个合并各模块分支
+git merge feat/module-04
+git merge feat/module-05
+# ...
+
+# 清理 worktree
+git worktree remove ../LLM-m04
+git worktree remove ../LLM-m05
+# ...
+```
+
+##### 1.2 子代理分组与调度
 
 | 批次 | 模块 | 子代理分配 | 理由 |
 |------|------|-----------|------|
 | 批次 1 | 4, 5, 6 | 各 1 个子代理 | 架构类模块，相互独立 |
-| 批次 2 | 7, 8, 9 | 各 1 个子代理 | 训练类模块，相互独立 |
+| 批次 2 | 7, 8A, 8B, 8C, 9 | 各 1 个子代理 | 训练类模块，相互独立（8A/8B/8C 可并行） |
 | 批次 3 | 10, 11, 12 | 各 1 个子代理 | 对齐类模块，相互独立 |
 | 批次 4 | 13, 14, 15, 16 | 各 1 个子代理 | 应用/前沿类模块 |
 
 每批次内的子代理并行启动，批次间可串行也可并行（模块间内容独立性较高）。
 
-子代理 prompt 模板：
+##### 1.3 子代理调度 prompt 模板
+
 ```
-你是 LLM 教程撰写者。请根据 OUTLINE.md 中模块 X 的大纲，创建以下文件:
+你是 LLM 教程撰写者（Agent-{N}）。
+
+【工作目录】D:\Repos\LLM-m{XX}\（你的专属 worktree）
+【工作分支】feat/module-{XX}（已由主 Agent 创建）
+
+请根据 OUTLINE.md 中模块 {X} 的大纲，在你的工作目录中创建以下文件:
 1. {XX_module}/README.md — 核心教程（理论+数学推导+Mermaid图+三条技术线+项目实践）
 2. {XX_module}/advanced.md — 进阶工业实践
 3. code/{module}/*.py — 代码实现文件
+
+完成后在你的分支上 git commit，格式遵循 Git Workflow.md。
+不要执行 git merge 或 git push。
 
 【关键约束】见下方"写作规范"。
 ```
 
 **2. 项目实践的开放式原则（重要！）**
 
-本教程面向"理论强、编码弱"的大学生，项目设计为**开放式**：
+本教程面向"理论基础较强，渴望提高编程能力和工程能力"的大学生，项目设计为**开放式**：
 
 | 难度 | 提供内容 | 不提供 |
 |------|---------|-------|
@@ -1934,4 +2381,4 @@ code/{module}/
 
 ---
 
-*最后更新: 2026-02-14*
+*最后更新: 2026-02-15*

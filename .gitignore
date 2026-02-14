@@ -71,3 +71,7 @@ Thumbs.db
 # Temporary
 *.tmp
 *.temp
+
+# 
+.obsidian
+.claude
