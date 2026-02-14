@@ -25,7 +25,8 @@
 - [模块 12: DPO 及变体 — 直接偏好优化](#模块-12-dpo-及变体--直接偏好优化)
 - [模块 13: CoT 与推理 — 思维链与测试时计算](#模块-13-cot-与推理--思维链与测试时计算)
 - [模块 14: 推理加速 — KV Cache/量化/系统优化](#模块-14-推理加速--kv-cache量化系统优化)
-- [模块 15: 前沿专题 — 可解释性/安全/多模态](#模块-15-前沿专题--可解释性安全多模态)
+- [模块 15: RAG 与知识增强 — 检索、向量库与 GraphRAG](#模块-15-rag-与-知识增强--检索向量库与-graphrag)
+- [模块 16: 前沿专题 — 可解释性/安全/多模态](#模块-16-前沿专题--可解释性安全多模态)
 - [终极项目: 从零训练一个完整 LLM](#终极项目-从零训练一个完整-llm)
 
 ---
@@ -731,6 +732,7 @@ code/data_engineering/
   - 轮换机制（Rotation）：保留最近 N 个 checkpoints，防止磁盘写满
   - 原子写入（Atomic Write）：防止在写入过程中崩溃导致文件损坏
   - **实战代码**: 实现 `save_checkpoint()` 和 `load_checkpoint()` 并在训练循环中集成
+
 #### 5. 训练监控
 - 损失曲线解读
 - 梯度范数监控
@@ -1365,7 +1367,83 @@ code/inference/
 
 ---
 
-## 模块 15: 前沿专题 — 可解释性/安全/多模态
+## 模块 15: RAG 与 知识增强 — 检索、向量库与 GraphRAG
+
+### README.md
+
+#### 1. RAG (Retrieval-Augmented Generation) 核心范式
+- 幻觉问题与知识截止（Knowledge Cutoff）
+- RAG 的数学形式：$P(y|x) \approx \sum_{z \in TopK(x)} P(y|x,z) P(z|x)$
+- **Naive RAG vs Advanced RAG**:
+  - 预检索（Pre-retrieval）：Query 重写、HyDE（假设性文档嵌入）
+  - 后检索（Post-retrieval）：重排序（Reranking）、上下文压缩
+
+#### 2. 向量检索算法（Vector Search）
+- **稠密检索 (Dense Retrieval)**:
+  - 双塔架构（Bi-Encoder）：Query 与 Doc 的内积相似度
+  - 对比学习损失：InfoNCE Loss 推导
+- **ANN (Approximate Nearest Neighbor) 算法**:
+  - 暴力搜索 vs 近似搜索的时间复杂度
+  - **HNSW (Hierarchical Navigable Small World)**:
+    - 核心图论：跳表（Skip List）+ 小世界网络（Small World Network）
+    - 贪心搜索路径的数学证明
+    - 插入与搜索过程的复杂度分析 ($O(\log N)$)
+
+#### 3. 稀疏检索与混合搜索
+- **BM25 算法回顾**: TF-IDF 的概率改进版
+- **Hybrid Search**:
+  - 为什么关键词匹配依然重要？（精确匹配 vs 语义匹配）
+  - 倒数排名融合 (RRF) 算法：$score = \sum \frac{1}{k + rank_i}$
+
+#### 4. GraphRAG (基于知识图谱的 RAG)
+- 动机：解决"Global Question"（跨文档归纳）难题
+- 架构流程（DeepSeek/Microsoft 路线）：
+  - 文本 → 实体抽取 (LLM) → 构建图谱 (NetworkX)
+  - 社区发现 (Leiden Algorithm) 的数学原理
+  - 社区摘要生成 → 答案合成
+- GraphRAG vs Vector RAG 的覆盖率对比
+
+### advanced.md
+
+#### 1. Google 的 RAG 研究
+- **REALM / RETRO**: 将检索引入预训练阶段
+- **Infinite Attention vs RAG**: 长上下文是否会杀死 RAG？
+  - "Lost in the Middle" 现象的数学解释
+  - 上下文窗口与检索精度的 Trade-off
+
+#### 2. DeepSeek 与 工业界实践
+- DeepSeek-R1 在 Search 场景的应用
+- **Rerank 模型**：Cross-Encoder 的蒸馏与部署
+- 向量数据库选型：Faiss vs Milvus vs pgvector 底层差异
+
+#### 3. 前沿话题
+- **RAG 对齐 (RAG Alignment)**: 防止检索到有毒内容导致的生成攻击
+- **Self-RAG**: 模型学会自我反思"是否需要检索"
+- **LongRAG**: 大 chunk 检索与长文本阅读器的结合
+
+### 代码目录 `code/rag/`
+
+```
+code/rag/ 
+├── dense_retriever.py # 基于 BERT/Embedding 的双塔检索 
+├── bm25_retriever.py # 手写 BM25 算法 
+├── hnsw_index.py # 简化的 HNSW 图索引实现（Python版）
+├── graph_rag_basic.py # 简化的 GraphRAG 流程（实体抽取+建图） 
+├── reranker.py # Cross-Encoder 重排序 
+└── rag_pipeline.py # 完整的 Retrieve-Read-Generate 管道
+```
+
+
+### 项目实践 
+| #   | 项目名称                               | 难度     | 提供内容                       | 核心目标      |
+| --- | ---------------------------------- | ------ | -------------------------- | --------- |
+| 1   | 从零实现 HNSW 索引构建与搜索                  | ⭐⭐⭐ 挑战 | 论文算法伪代码 + 图结构类             | 理解向量库底层原理 |
+| 2   | 构建一个混合检索 (Hybrid Search) 系统        | ⭐⭐ 进阶  | BM25 + Embedding 代码        | 理解互补优势    |
+| 3   | 实现简易版 GraphRAG (实体共现图)             | ⭐⭐⭐ 挑战 | 实体抽取 Prompt + NetworkX 图算法 | 掌握前沿 RAG  |
+| 4   | 对比 RAG 与 Long Context (128k) 的问答效果 | ⭐⭐ 进阶  | 评测数据集 + 对比脚本               | 理解技术边界    |
+
+---
+## 模块 16: 前沿专题 — 可解释性/安全/多模态
 
 ### README.md
 
@@ -1454,84 +1532,6 @@ code/advanced_topics/
 | 2   | 分析注意力头的功能（Induction Head 检测） | ⭐⭐⭐ 挑战 | 分析方法 + 检测代码框架     | 理解 Circuits 分析 |
 | 3   | 实现一个简单的 Red Teaming 框架       | ⭐⭐ 进阶  | 攻击策略 + 评估指标 + 伪代码 | 理解安全评估         |
 | 4   | 搭建一个简单的多模态 LLM               | ⭐⭐⭐ 挑战 | 架构设计思路 + 关键代码片段   | 理解多模态架构        |
-
----
-
-## 模块 16: RAG 与 知识增强 — 检索、向量库与 GraphRAG
-
-### README.md
-
-#### 1. RAG (Retrieval-Augmented Generation) 核心范式
-- 幻觉问题与知识截止（Knowledge Cutoff）
-- RAG 的数学形式：$P(y|x) \approx \sum_{z \in TopK(x)} P(y|x,z) P(z|x)$
-- **Naive RAG vs Advanced RAG**:
-  - 预检索（Pre-retrieval）：Query 重写、HyDE（假设性文档嵌入）
-  - 后检索（Post-retrieval）：重排序（Reranking）、上下文压缩
-
-#### 2. 向量检索算法（Vector Search）
-- **稠密检索 (Dense Retrieval)**:
-  - 双塔架构（Bi-Encoder）：Query 与 Doc 的内积相似度
-  - 对比学习损失：InfoNCE Loss 推导
-- **ANN (Approximate Nearest Neighbor) 算法**:
-  - 暴力搜索 vs 近似搜索的时间复杂度
-  - **HNSW (Hierarchical Navigable Small World)**:
-    - 核心图论：跳表（Skip List）+ 小世界网络（Small World Network）
-    - 贪心搜索路径的数学证明
-    - 插入与搜索过程的复杂度分析 ($O(\log N)$)
-
-#### 3. 稀疏检索与混合搜索
-- **BM25 算法回顾**: TF-IDF 的概率改进版
-- **Hybrid Search**:
-  - 为什么关键词匹配依然重要？（精确匹配 vs 语义匹配）
-  - 倒数排名融合 (RRF) 算法：$score = \sum \frac{1}{k + rank_i}$
-
-#### 4. GraphRAG (基于知识图谱的 RAG)
-- 动机：解决"Global Question"（跨文档归纳）难题
-- 架构流程（DeepSeek/Microsoft 路线）：
-  - 文本 → 实体抽取 (LLM) → 构建图谱 (NetworkX)
-  - 社区发现 (Leiden Algorithm) 的数学原理
-  - 社区摘要生成 → 答案合成
-- GraphRAG vs Vector RAG 的覆盖率对比
-
-### advanced.md
-
-#### 1. Google 的 RAG 研究
-- **REALM / RETRO**: 将检索引入预训练阶段
-- **Infinite Attention vs RAG**: 长上下文是否会杀死 RAG？
-  - "Lost in the Middle" 现象的数学解释
-  - 上下文窗口与检索精度的 Trade-off
-
-#### 2. DeepSeek 与 工业界实践
-- DeepSeek-R1 在 Search 场景的应用
-- **Rerank 模型**：Cross-Encoder 的蒸馏与部署
-- 向量数据库选型：Faiss vs Milvus vs pgvector 底层差异
-
-#### 3. 前沿话题
-- **RAG 对齐 (RAG Alignment)**: 防止检索到有毒内容导致的生成攻击
-- **Self-RAG**: 模型学会自我反思"是否需要检索"
-- **LongRAG**: 大 chunk 检索与长文本阅读器的结合
-
-### 代码目录 `code/rag/`
-
-```
-code/rag/ 
-├── dense_retriever.py # 基于 BERT/Embedding 的双塔检索 
-├── bm25_retriever.py # 手写 BM25 算法 
-├── hnsw_index.py # 简化的 HNSW 图索引实现（Python版）
-├── graph_rag_basic.py # 简化的 GraphRAG 流程（实体抽取+建图） 
-├── reranker.py # Cross-Encoder 重排序 
-└── rag_pipeline.py # 完整的 Retrieve-Read-Generate 管道
-```
-
-
-### 项目实践 
-| #   | 项目名称                               | 难度     | 提供内容                       | 核心目标      |
-| --- | ---------------------------------- | ------ | -------------------------- | --------- |
-| 1   | 从零实现 HNSW 索引构建与搜索                  | ⭐⭐⭐ 挑战 | 论文算法伪代码 + 图结构类             | 理解向量库底层原理 |
-| 2   | 构建一个混合检索 (Hybrid Search) 系统        | ⭐⭐ 进阶  | BM25 + Embedding 代码        | 理解互补优势    |
-| 3   | 实现简易版 GraphRAG (实体共现图)             | ⭐⭐⭐ 挑战 | 实体抽取 Prompt + NetworkX 图算法 | 掌握前沿 RAG  |
-| 4   | 对比 RAG 与 Long Context (128k) 的问答效果 | ⭐⭐ 进阶  | 评测数据集 + 对比脚本               | 理解技术边界    |
-
 
 ---
 
@@ -1769,7 +1769,14 @@ code/
 │   ├── benchmark.py
 |   ├── triton_kernels.py      # Triton 算子实现 (Vector Add, Softmax)
 │   └── utils.py
-└── advanced_topics/           # 模块 15
+├── rag/                       # 模块 15 (新增)
+│   ├── dense_retriever.py
+│   ├── bm25_retriever.py
+│   ├── hnsw_index.py
+│   ├── graph_rag_basic.py
+│   ├── reranker.py
+│   └── rag_pipeline.py
+└── advanced_topics/           # 模块 16
     ├── sparse_autoencoder.py
     ├── feature_visualization.py
     ├── activation_patching.py
@@ -1817,22 +1824,113 @@ code/
 
 ## 执行计划
 
-### 第一阶段: 更新已有模块（0-3）
-1. 提交当前暂存文件
-2. 更新模块 0: 添加 Anthropic 主线 + 创建 advanced.md
-3. 更新模块 1: 添加 Anthropic 内容 + 创建 advanced.md + 增加项目
-4. 更新模块 2: 添加 Anthropic 内容 + 创建 advanced.md + 提取 .py 文件 + 增加项目
-5. 更新模块 3: 添加 Anthropic 内容 + 创建 advanced.md + 提取 .py 文件 + 增加项目
-6. 每步完成后独立 commit
+### 第一阶段: 更新已有模块（0-3）✅ 已完成
 
-### 第二阶段: 编写新模块（4-15）
-- 使用并行代理加速
-- 每个代理负责 1-2 个模块
-- 统一使用 opus 模型
+| 步骤 | 内容 | Commit |
+|------|------|--------|
+| 1. 提交暂存文件 + OUTLINE.md | 初始化 | `49ee1ce` |
+| 2. 模块 0: Anthropic 主线 + advanced.md | 完成 | `12182c3` |
+| 3. 模块 1: Anthropic 内容 + advanced.md + 项目扩展 | 完成 | `87df7de` |
+| 4. 模块 2: Anthropic 内容 + advanced.md + 代码提取 + 项目扩展 | 完成 | `3d4a622` |
+| 5. 模块 3: Anthropic 内容 + advanced.md + 代码提取 + 项目扩展 | 完成 | `4433aaf` + `9576fd4` |
+| 6. 杂项: BOM 修复 + OUTLINE 扩展 | 完成 | `5cf4c2d` + `16da8f4` |
+
+**已完成的产出物**:
+- `00_overview/`: README.md(已有) + advanced.md
+- `01_tokenization/`: README.md(已有) + advanced.md
+- `02_embedding/`: README.md(已更新) + advanced.md + `code/embedding/{word2vec,positional_encoding,visualize}.py`
+- `03_transformer/`: README.md(已更新) + advanced.md + `code/transformer/{attention,normalization,feedforward,block,model,__init__}.py`
+
+### 第二阶段: 编写新模块（4-16）⬅️ 当前阶段
+
+> **重要**: 本阶段开启新会话执行。以下是给新会话的完整上下文。
+
+#### 执行方式
+
+**1. 使用子代理（Sub-agents）并行编写**
+
+每个模块的工作量大（README.md ~400行 + advanced.md ~300行 + 代码文件），适合用 Task 工具的子代理并行处理。推荐分组：
+
+| 批次 | 模块 | 子代理分配 | 理由 |
+|------|------|-----------|------|
+| 批次 1 | 4, 5, 6 | 各 1 个子代理 | 架构类模块，相互独立 |
+| 批次 2 | 7, 8, 9 | 各 1 个子代理 | 训练类模块，相互独立 |
+| 批次 3 | 10, 11, 12 | 各 1 个子代理 | 对齐类模块，相互独立 |
+| 批次 4 | 13, 14, 15, 16 | 各 1 个子代理 | 应用/前沿类模块 |
+
+每批次内的子代理并行启动，批次间可串行也可并行（模块间内容独立性较高）。
+
+子代理 prompt 模板：
+```
+你是 LLM 教程撰写者。请根据 OUTLINE.md 中模块 X 的大纲，创建以下文件:
+1. {XX_module}/README.md — 核心教程（理论+数学推导+Mermaid图+三条技术线+项目实践）
+2. {XX_module}/advanced.md — 进阶工业实践
+3. code/{module}/*.py — 代码实现文件
+
+【关键约束】见下方"写作规范"。
+```
+
+**2. 项目实践的开放式原则（重要！）**
+
+本教程面向"理论强、编码弱"的大学生，项目设计为**开放式**：
+
+| 难度 | 提供内容 | 不提供 |
+|------|---------|-------|
+| ⭐ 入门 | 完整可运行代码 + 详细注释 | — |
+| ⭐⭐ 进阶 | 思路 + 关键代码片段 + 评估方法 | 完整实现 |
+| ⭐⭐⭐ 挑战 | 思路 + 流程图(Mermaid) + 伪代码 + 论文指引 | 完整实现 |
+
+即：**撰书者（Opus 模型）不需要给出完整代码**，仅提供思路、流程图（Mermaid）、伪代码、关键部分代码片段。让学生自己动手填充。
+
+**3. 写作规范（所有子代理必须遵守）**
+
+- **语言**: 正文中文，代码注释中文，数学公式 LaTeX
+- **三条技术线**: Google / DeepSeek / Anthropic 贯穿每个模块
+  - Anthropic 内容基于公开信息，推测部分必须标注
+- **文档结构**:
+  - README.md: 核心理论 → 数学推导 → 代码实现 → 三条技术线的实践 → 项目实践
+  - advanced.md: Google 实践 → DeepSeek 实践 → Anthropic 视角 → 前沿话题
+- **代码文件**: 放在 `code/{模块名}/` 下，按逻辑职责拆分为独立 .py 文件
+  - 每个文件包含完整的类/函数定义、中文 docstring、`if __name__ == "__main__"` 演示
+  - PyTorch 为主框架
+  - 代码应能独立运行（无需依赖本项目其他模块）
+- **Mermaid 图**: 架构图、流程图、对比图，大量使用
+- **数学推导**: 不省略关键步骤，给出直觉解释
+- **项目实践**: 每模块 3-4 个，难度梯度递进，按上述开放式原则
+- **Git**: 每个模块完成后独立 commit，格式 `feat({module}): {描述}`
+
+**4. 代码文件的提供策略**
+
+`code/{module}/` 下的 .py 文件不同于项目实践中的代码：
+- **code/ 下的文件**: 提供**完整可运行的参考实现**，是教程正文中代码的提取和整理
+- **项目实践中的代码**: 按难度梯度提供（完整/部分/仅思路）
+
+**5. 每个模块的预期产出**
+
+```
+{XX_module}/
+├── README.md          # ~300-500 行，核心教程
+└── advanced.md        # ~200-400 行，进阶内容
+
+code/{module}/
+├── *.py               # 若干代码文件，按 OUTLINE.md 中的代码目录规划
+└── __init__.py         # 包初始化（可选）
+```
+
+**6. 已完成模块可作为参考范例**
+
+新会话可以读取以下已完成文件作为风格参考：
+- `03_transformer/README.md` — README 范例（最完整的一个）
+- `03_transformer/advanced.md` — advanced.md 范例
+- `code/transformer/attention.py` — 代码文件范例
+- `02_embedding/advanced.md` — 另一个 advanced.md 范例
 
 ### 第三阶段: 终极项目
-- 两个代理分别完成 Version A 和 Version B
-- 整合测试
+
+- 在模块 4-16 全部完成后执行
+- 两个子代理分别完成 Version A（300M 单GPU）和 Version B（1B 多GPU）
+- 终极项目代码框架提供关键逻辑留空的脚手架，学生整合前面模块知识来填充
+- 整合测试与文档
 
 ---
 
