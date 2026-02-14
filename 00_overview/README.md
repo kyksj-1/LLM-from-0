@@ -1,4 +1,4 @@
-﻿# 序章：LLM全景图与学习路径
+# 序章：LLM全景图与学习路径
 
 > 本章将带你俯瞰大语言模型的完整技术版图，建立对LLM发展脉络的全局认知。理解"我们从哪里来，要到哪里去"，是深入学习任何技术的第一步。
 
@@ -11,8 +11,10 @@
 - [3. 主流模型族谱](#3-主流模型族谱)
 - [4. Google的技术贡献](#4-google的技术贡献)
 - [5. DeepSeek技术路线](#5-deepseek技术路线)
-- [6. 本教程学习路径](#6-本教程学习路径)
-- [7. 前置知识检查清单](#7-前置知识检查清单)
+- [6. Anthropic技术路线](#6-anthropic技术路线)
+- [7. 三条技术线对比](#7-三条技术线对比)
+- [8. 本教程学习路径](#8-本教程学习路径)
+- [9. 前置知识检查清单](#9-前置知识检查清单)
 
 ---
 
@@ -40,9 +42,9 @@ timeline
         2019 : GPT-2发布
         2020 : GPT-3震撼登场
     section LLM时代 (2020-至今)
-        2022 : ChatGPT发布
-        2023 : Llama开源/ GPT-4
-        2024 : DeepSeek-V3/ Llama 3
+        2022 : ChatGPT发布/ Claude 1
+        2023 : Llama开源/ GPT-4/ Claude 2
+        2024 : DeepSeek-V3/ Llama 3/ Claude 3.5
 ```
 
 ### 1.2 数学形式的演变
@@ -143,6 +145,7 @@ graph TB
     D --> D2[Llama系列]
     D --> D3[DeepSeek系列]
     D --> D4[PaLM/Gemma]
+    D --> D5[Claude系列]
 ```
 
 ### 2.2 三种架构对比
@@ -217,6 +220,13 @@ graph TD
     G1 --> G2[PaLM-2 2023]
     G --> G3[Gemma 2024.2]
     G3 --> G4[Gemma 2 2024.6]
+
+    A --> H[Anthropic系列]
+    H --> H1[Claude 1 2023.3]
+    H1 --> H2[Claude 2 2023.7]
+    H2 --> H3[Claude 3 2024.3]
+    H3 --> H4[Claude 3.5 2024.6]
+    H4 --> H5[Claude 4 2025]
 ```
 
 ### 3.2 关键模型技术特征
@@ -232,6 +242,8 @@ graph TD
 | **DeepSeek-V3** | 671B(MoE) | MoE+MLA | 14.8T tokens | DeepSeekMoE、DualPipe |
 | **DeepSeek-R1** | 671B(MoE) | MoE+MLA | - | 强化学习推理 |
 | **Gemma 2** | 2-27B | Decoder-only | 13T tokens | 知识蒸馏 |
+| **Claude 3** | 未公开 | Decoder-only | 未公开 | Constitutional AI、RLAIF |
+| **Claude 3.5** | 未公开 | Decoder-only | 未公开 | 安全对齐、长上下文 |
 
 ---
 
@@ -514,7 +526,238 @@ graph TB
 
 ---
 
-## 6. 本教程学习路径
+## 6. Anthropic技术路线
+
+Anthropic是LLM安全对齐领域的先驱，由前OpenAI研究副总裁Dario Amodei和Daniela Amodei于2021年创立。其核心理念是**安全优先的AI开发**（Safety-first AI development），在推动模型能力提升的同时，始终将安全性作为首要考量。
+
+### 6.1 创立背景与核心理念
+
+**创立动机**：
+- 对AI安全问题的深切关注
+- 认为需要一家**以安全研究为核心使命**的AI公司
+- "Race to the Top" 理念：通过展示安全与能力可以兼得，引导行业良性竞争
+
+**与其他公司的差异化**：
+
+```mermaid
+graph TB
+    subgraph Google
+        G1[开源生态] --> G2[基础架构创新]
+        G2 --> G3[Transformer/BERT/Gemma]
+    end
+
+    subgraph DeepSeek
+        D1[极致效率] --> D2[架构创新]
+        D2 --> D3[MoE/MLA/DualPipe]
+    end
+
+    subgraph Anthropic
+        A1[安全优先] --> A2[对齐研究]
+        A2 --> A3[Constitutional AI/可解释性]
+    end
+```
+
+### 6.2 Claude模型演进
+
+```mermaid
+timeline
+    title Claude模型演进
+    section 第一代
+        2023.3 : Claude 1 (初代发布)
+        2023.7 : Claude 2 (能力大幅提升)
+    section 第二代
+        2024.3 : Claude 3 系列
+        : Claude 3 Haiku (轻量快速)
+        : Claude 3 Sonnet (均衡)
+        : Claude 3 Opus (旗舰)
+    section 第三代
+        2024.6 : Claude 3.5 Sonnet
+        2024.10 : Claude 3.5 Haiku
+    section 第四代
+        2025 : Claude 4 系列
+        : 推理能力大幅增强
+```
+
+**多规格策略**：
+
+| 模型 | 定位 | 特点 |
+|------|------|------|
+| Haiku | 轻量级 | 低延迟、低成本，适合高吞吐场景 |
+| Sonnet | 均衡型 | 能力与成本的最佳平衡 |
+| Opus | 旗舰级 | 最强能力，适合复杂推理任务 |
+
+### 6.3 核心技术贡献
+
+#### 6.3.1 Constitutional AI（宪法AI）
+
+**核心思想**：用一组人类定义的**原则（Constitution）**替代大量人类标注，实现AI的自我对齐。
+
+```mermaid
+graph TB
+    A[基础模型] --> B[生成回答]
+    B --> C[Self-Critique]
+    C --> D[依据宪法原则自我评判]
+    D --> E[Self-Revision]
+    E --> F[生成改进版回答]
+    F --> G[用改进数据训练]
+    G --> H[对齐后的模型]
+
+    I[宪法原则] --> D
+    I --> |例如| I1[有益、无害、诚实]
+    I --> |例如| I2[尊重隐私]
+    I --> |例如| I3[避免欺骗]
+```
+
+**关键论文**：Bai et al. (2022) - *Constitutional AI: Harmlessness from AI Feedback*
+
+**创新点**：
+1. **减少人工标注**：用AI反馈（RLAIF）替代部分人类反馈（RLHF）
+2. **可控性**：通过修改宪法原则调整模型行为
+3. **透明性**：模型的行为准则是显式的、可审查的
+
+#### 6.3.2 RLAIF（AI反馈强化学习）
+
+RLAIF是Constitutional AI的核心技术，用AI自身的判断替代人类偏好标注：
+
+**传统RLHF**：
+$$r_\text{human}(x, y) \leftarrow \text{人类标注者判断}$$
+
+**RLAIF**：
+$$r_\text{AI}(x, y) \leftarrow \text{AI根据宪法原则判断}$$
+
+**优势**：
+- 标注成本大幅降低
+- 标注一致性更高
+- 可快速迭代宪法原则
+
+#### 6.3.3 可解释性研究（Mechanistic Interpretability）
+
+Anthropic在**模型可解释性**领域的研究是其最具影响力的学术贡献之一。
+
+**核心研究方向**：
+
+1. **Transformer电路理论**（Transformer Circuits Thread）
+   - 将Transformer理解为由可解释的"电路"组成的计算图
+   - 论文：*A Mathematical Framework for Transformer Circuits* (Elhage et al., 2021)
+
+2. **Induction Heads**（归纳头）
+   - 发现注意力头的特定功能模式
+   - 与In-Context Learning能力的关系
+   - 论文：*In-context Learning and Induction Heads* (Olsson et al., 2022)
+
+3. **Superposition**（叠加）假设
+   - 模型在有限维度中编码超过维度数量的特征
+   - 论文：*Toy Models of Superposition* (Elhage et al., 2022)
+
+4. **稀疏自编码器（SAE）解读模型**
+   - 用SAE提取模型内部的可解释特征
+   - 论文：*Towards Monosemanticity* (Bricken et al., 2023)
+   - 论文：*Scaling Monosemanticity* (Templeton et al., 2024)
+
+```mermaid
+graph LR
+    A[模型激活值] --> B[稀疏自编码器 SAE]
+    B --> C[可解释特征]
+
+    C --> C1[Golden Gate Bridge特征]
+    C --> C2[编程相关特征]
+    C --> C3[安全相关特征]
+    C --> C4[数学推理特征]
+
+    style B fill:#f9f,stroke:#333
+```
+
+#### 6.3.4 HH-RLHF数据集
+
+Anthropic开源了**Helpful and Harmless (HH-RLHF)** 数据集，为对齐研究提供了重要的公共资源：
+
+- **规模**：约170K对话偏好对
+- **维度**：有益性（Helpful）与无害性（Harmless）
+- **格式**：每条数据包含一对回答（chosen vs rejected）
+- **应用**：广泛用于RLHF和DPO研究
+
+#### 6.3.5 Scaling Laws贡献
+
+Anthropic在Scaling Laws领域有重要的实证研究：
+
+- 验证了模型规模与能力之间的幂律关系
+- 提出了**Responsible Scaling Policy**：基于模型能力等级制定安全措施
+- 为"多大的模型需要多少安全措施"提供了理论框架
+
+### 6.4 Anthropic的技术特色
+
+**闭源但学术开放**：
+- Claude模型不开源，但大量发表高质量研究论文
+- 可解释性研究成果对整个领域影响深远
+- HH-RLHF等关键数据集开源
+
+**安全对齐的系统化方法**：
+- Constitutional AI → RLAIF → 可解释性 → 安全评估 形成完整闭环
+- 不仅追求"让模型更有用"，更追求"理解模型为什么这样做"
+
+> **注意**：由于Claude模型不开源，部分技术细节基于Anthropic的公开论文和博客。对于推测性内容，本教程会明确标注。
+
+---
+
+## 7. 三条技术线对比
+
+### 7.1 技术路线对比
+
+| 维度 | Google | DeepSeek | Anthropic |
+|------|--------|----------|-----------|
+| **核心定位** | 基础架构创新者 | 极致效率追求者 | 安全对齐先驱 |
+| **代表模型** | Gemini / Gemma | DeepSeek-V3 / R1 | Claude 系列 |
+| **架构创新** | Transformer, MQA→GQA | MoE, MLA, DualPipe | 未公开（研究重点在对齐） |
+| **训练方法** | 大规模TPU集群 | FP8混合精度, 高效并行 | Constitutional AI, RLAIF |
+| **对齐方法** | RLHF + 指令微调 | GRPO, 规则奖励 | Constitutional AI, RLAIF |
+| **开源策略** | 部分开源(Gemma) | 完全开源 | 闭源(研究论文开放) |
+| **推理能力** | Gemini思考模式 | R1推理模型 | Claude扩展思考 |
+
+### 7.2 各公司的核心贡献总结
+
+```mermaid
+graph TB
+    subgraph "Google: 奠基者"
+        G1[Transformer架构]
+        G2[预训练范式 BERT/T5]
+        G3[Scaling Laws验证 PaLM]
+        G4[开源模型 Gemma]
+    end
+
+    subgraph "DeepSeek: 创新者"
+        D1[细粒度MoE]
+        D2[MLA注意力]
+        D3[DualPipe并行]
+        D4[GRPO算法]
+        D5[R1推理突破]
+    end
+
+    subgraph "Anthropic: 守护者"
+        A1[Constitutional AI]
+        A2[RLAIF]
+        A3[可解释性研究]
+        A4[安全评估框架]
+        A5[HH-RLHF数据集]
+    end
+```
+
+### 7.3 本教程中三条技术线的呈现
+
+| 模块 | Google | DeepSeek | Anthropic |
+|------|--------|----------|-----------|
+| 分词 | SentencePiece / Gemma 256k词表 | 中英文平衡分词 | 分词器特性分析 |
+| 嵌入 | 正弦位置编码 / T5 Relative PE | RoPE工程实践 / YaRN | Superposition假设 |
+| Transformer | 原始架构 / PaLM优化 | MoE中的Block变体 | 电路理论 / Induction Heads |
+| 注意力 | MQA → GQA | MLA | 注意力可解释性 |
+| 预训练 | PaLM/Gemini训练策略 | FP8训练 / 多阶段训练 | Scaling Laws实证 |
+| SFT | FLAN / Gemma-IT | DeepSeek SFT策略 | Red Teaming数据 |
+| RLHF | 多维奖励建模 | GRPO | Constitutional AI / RLAIF / HH-RLHF |
+| DPO | 偏好优化实践 | GRPO完整技术 | RLAIF + DPO组合 |
+| 推理 | Gemini推理 / AlphaProof | R1推理模型 | Claude推理与安全 |
+
+---
+
+## 8. 本教程学习路径
 
 ### 6.1 整体路线图
 
@@ -607,7 +850,7 @@ graph LR
 
 ---
 
-## 7. 前置知识检查清单
+## 9. 前置知识检查清单
 
 在开始学习之前，请确保你已经掌握以下知识：
 
@@ -706,7 +949,7 @@ $$\frac{\partial \text{softmax}(z_i)}{\partial z_k} = \text{softmax}(z_i)(\delta
 
 ---
 
-## 8. 本章小结
+## 10. 本章小结
 
 本章建立了LLM的宏观认知框架：
 
@@ -715,6 +958,8 @@ $$\frac{\partial \text{softmax}(z_i)}{\partial z_k} = \text{softmax}(z_i)(\delta
 3. **模型族谱**：主流开源模型的技术特征和创新点
 4. **Google贡献**：Transformer、BERT、T5、PaLM奠定技术基础
 5. **DeepSeek创新**：MoE、MLA、DualPipe代表的最前沿实践
+6. **Anthropic守护**：Constitutional AI、可解释性研究引领安全对齐
+7. **三线并行**：Google（基础）、DeepSeek（效率）、Anthropic（安全）三条技术线贯穿全教程
 
 **下一章预告**：[模块1: Tokenization](../01_tokenization/README.md) - 我们将深入分词算法的数学原理，并从零实现一个BPE分词器。
 
@@ -732,6 +977,13 @@ $$\frac{\partial \text{softmax}(z_i)}{\partial z_k} = \text{softmax}(z_i)(\delta
 6. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model*.
 7. DeepSeek-AI (2024). *DeepSeek-V3 Technical Report*.
 8. DeepSeek-AI (2025). *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*.
+9. Bai et al. (2022). *Constitutional AI: Harmlessness from AI Feedback*. Anthropic.
+10. Bai et al. (2022). *Training a Helpful and Harmless Assistant with RLHF*. Anthropic.
+11. Elhage et al. (2021). *A Mathematical Framework for Transformer Circuits*. Anthropic.
+12. Olsson et al. (2022). *In-context Learning and Induction Heads*. Anthropic.
+13. Elhage et al. (2022). *Toy Models of Superposition*. Anthropic.
+14. Bricken et al. (2023). *Towards Monosemanticity: Decomposing Language Models With Dictionary Learning*. Anthropic.
+15. Templeton et al. (2024). *Scaling Monosemanticity*. Anthropic.
 
 ### 博客与教程
 
