@@ -12,8 +12,10 @@
 - [4. Feed-Forward Network](#4-feed-forward-network)
 - [5. 完整的Transformer Block](#5-完整的transformer-block)
 - [6. Google的Transformer实践](#6-google的transformer实践)
-- [7. 从零实现Transformer](#7-从零实现transformer)
-- [8. 练习项目](#8-练习项目)
+- [7. DeepSeek的Transformer创新](#7-deepseek的transformer创新)
+- [8. Anthropic的Transformer研究](#8-anthropic的transformer研究)
+- [9. 从零实现Transformer](#9-从零实现transformer)
+- [10. 项目实践](#10-项目实践)
 
 ---
 
@@ -709,9 +711,159 @@ Attention和FFN并行计算，而非串行。
 
 ---
 
-## 7. 从零实现Transformer
+## 7. DeepSeek的Transformer创新
 
-### 7.1 完整代码
+DeepSeek 在 Transformer 架构上做出了多项重要创新，尤其是在注意力机制和专家混合方面。
+
+### 7.1 Multi-head Latent Attention (MLA)
+
+DeepSeek-V2 提出的 MLA 是对标准 MHA 的重大改进，通过**低秩压缩 KV** 大幅降低推理成本。
+
+**核心思想**：将 KV 压缩到低维潜在空间，推理时只需缓存压缩表示。
+
+$$c_{KV} = W_{DKV} h_t \in \mathbb{R}^{d_c}, \quad d_c \ll n_h \cdot d_h$$
+
+**KV Cache 压缩效果**：
+
+| 方案 | KV Cache 大小（每层每 token） | 典型值 |
+|------|-------------------------------|--------|
+| 标准 MHA | $2 \times n_h \times d_h$ | 32,768 |
+| GQA (Llama 3) | $2 \times n_{kv} \times d_h$ | 2,048 |
+| MLA (DeepSeek) | $d_c + d_r$ | 576 |
+
+**约 57 倍压缩**，使得 DeepSeek-V2 可以用更少的显存服务更长的上下文。
+
+> 详见 [进阶文档](./advanced.md) 中对 MLA 数学原理的深入分析。
+
+### 7.2 DeepSeek 的架构演进
+
+```mermaid
+graph LR
+    A["DeepSeek-V1<br/>标准 MHA<br/>Dense FFN"] --> B["DeepSeek-V2<br/>MLA<br/>DeepSeekMoE"]
+    B --> C["DeepSeek-V3<br/>MLA + 辅助无损负载均衡<br/>多 token 预测"]
+```
+
+| 特性 | DeepSeek-V1 | DeepSeek-V2 | DeepSeek-V3 |
+|------|-------------|-------------|-------------|
+| 注意力 | MHA | MLA | MLA |
+| FFN | Dense | MoE (细粒度专家) | MoE (改进) |
+| 位置编码 | RoPE | 解耦 RoPE | 解耦 RoPE |
+| 激活函数 | SwiGLU | SwiGLU | SwiGLU |
+| 归一化 | RMSNorm | RMSNorm | RMSNorm |
+
+---
+
+## 8. Anthropic的Transformer研究
+
+Anthropic 在 Transformer 内部机制的研究上处于前沿，其 **Transformer Circuits** 研究线为理解 Transformer 的工作原理提供了重要理论框架。
+
+### 8.1 残差流视角 (Residual Stream)
+
+Anthropic 提出了理解 Transformer 的一个关键框架：**残差流**。
+
+**核心观点**：将残差连接视为信息的"主通道"（residual stream），每个注意力层和 FFN 层是从这个流中"读取"信息并"写入"信息的模块。
+
+```mermaid
+graph LR
+    A["Token<br/>Embedding"] --> B["残差流"]
+    B --> C["Attn 1<br/>读/写"]
+    C --> B2["残差流"]
+    B2 --> D["FFN 1<br/>读/写"]
+    D --> B3["残差流"]
+    B3 --> E["Attn 2<br/>读/写"]
+    E --> B4["残差流"]
+    B4 --> F["..."]
+    F --> G["Unembedding"]
+```
+
+**数学表达**：
+
+$$x_{final} = x_0 + \sum_{l=1}^{L} \text{Attn}_l(x) + \sum_{l=1}^{L} \text{FFN}_l(x)$$
+
+每一层的输出是对残差流的**增量更新**，而非替换。
+
+### 8.2 Induction Heads（归纳头）
+
+**Induction Heads** 是 Anthropic 发现的一种关键注意力模式，是 Transformer 进行上下文学习（in-context learning）的核心机制。
+
+**工作原理**：
+
+Induction Head 由**两个注意力头的组合**实现：
+
+```mermaid
+graph TB
+    subgraph "第一层: Previous Token Head"
+        A["位置 i"] -->|"关注 i-1"| B["将 token B 的信息<br/>复制到位置 i"]
+    end
+
+    subgraph "第二层: Induction Head"
+        C["当前位置"] -->|"搜索: 哪个位置之后<br/>的 token 与 B 匹配?"| D["找到 A...B 模式"]
+        D -->|"预测: A 之后<br/>应该出现 B"| E["输出 B 的预测"]
+    end
+```
+
+**具体示例**：
+
+序列中出现 "...Harry Potter...Harry"，Induction Head 的推理过程：
+
+1. 第一层：Previous Token Head 将 "Harry" 之后的 "Potter" 信息传递
+2. 第二层：当再次看到 "Harry" 时，Induction Head 查找之前 "Harry" 后面跟的是什么
+3. 输出：预测下一个词是 "Potter"
+
+**数学机制**：
+
+Induction Head 通过 QK 电路实现模式匹配：
+
+$$A_{ij} \propto \exp\left(\frac{(x_i W_Q)(x_j W_K)^T}{\sqrt{d_k}}\right)$$
+
+其中 $W_Q$ 和 $W_K$ 学习到的模式使得：当位置 $j$ 之后的 token 与当前位置之前的 token 匹配时，注意力分数最高。
+
+### 8.3 Transformer Circuits 关键发现
+
+Anthropic 的 Transformer Circuits 研究揭示了多个重要现象：
+
+**1. 注意力头的可解释角色**
+
+| 角色 | 功能 | 示例 |
+|------|------|------|
+| Previous Token Head | 关注前一个 token | 为 Induction Head 提供信息 |
+| Induction Head | 模式完成 | "A B ... A" → 预测 B |
+| Duplicate Token Head | 检测重复 | 标记序列中重复出现的 token |
+| Inhibition Head | 抑制重复 | 降低已出现 token 的概率 |
+
+**2. Superposition 在注意力中的体现**
+
+注意力头并非只学习单一功能——它们以 Superposition 的方式同时编码多种功能。这意味着：
+- 单个注意力头可能同时服务于多种语法/语义任务
+- 头的功能在不同输入上可能发生变化
+- 简单地按功能标记头可能过于简化
+
+**3. 相变与涌现**
+
+Anthropic 的研究表明，Induction Head 的出现与模型训练中的**相变**（phase change）有关：
+- 在训练早期，模型主要依赖 n-gram 统计
+- 在某个临界点，Induction Head 突然形成
+- 此后模型的 in-context learning 能力急剧提升
+- 这一相变与训练损失的突然下降相对应
+
+> 更多关于 Transformer Circuits 和 Mechanistic Interpretability 的内容详见 [进阶文档](./advanced.md)。
+
+### 8.4 三条技术线的 Transformer 架构对比
+
+| 维度 | Google | DeepSeek | Anthropic (Claude) |
+|------|--------|----------|-------------------|
+| 注意力 | MHA → MQA → GQA | MHA → MLA | 未公开 |
+| 归一化 | LayerNorm → RMSNorm | RMSNorm | 未公开 |
+| 激活函数 | GELU → GeGLU/SwiGLU | SwiGLU | 未公开 |
+| 位置编码 | Sinusoidal → RPB → RoPE | 解耦 RoPE | 未公开 |
+| FFN | Dense → MoE | Dense → 细粒度 MoE | 未公开 |
+| 研究重点 | 架构效率、多模态 | 推理效率、成本优化 | 可解释性、安全对齐 |
+
+---
+
+## 9. 从零实现Transformer
+
+### 9.1 完整代码
 
 ```python
 """
@@ -936,22 +1088,143 @@ if __name__ == "__main__":
 
 ---
 
-## 8. 练习项目
+## 10. 练习项目
 
-### 8.1 项目目标
+### 项目1：Mini-GPT 从零训练（★☆☆ 入门）
 
-从零实现一个小型GPT模型，并在简单文本上训练。
+**目标**：实现完整的小型 GPT 模型，在 Shakespeare 文本上训练并生成新文本。
 
-### 8.2 任务
+**任务**：
+1. 使用 `code/transformer/` 中的模块组装完整模型
+2. 加载 Shakespeare 数据集（约 1MB 纯文本）
+3. 实现字符级或子词级分词
+4. 训练语言模型（目标：验证集 loss < 1.5）
+5. 实现自回归生成，调节 temperature/top-k/top-p 参数
 
-1. 实现完整的Transformer
-2. 在Shakespeare文本上训练
-3. 生成新文本
-4. 分析注意力模式
+**参考代码框架**：
 
-### 8.3 代码框架
+```python
+# 训练循环骨架
+for epoch in range(epochs):
+    for batch in dataloader:
+        input_ids = batch[:, :-1]
+        targets = batch[:, 1:]
 
-见 `code/transformer/` 目录。
+        logits = model(input_ids)
+        loss = F.cross_entropy(
+            logits.view(-1, vocab_size),
+            targets.view(-1)
+        )
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+```
+
+**关键学习点**：
+- 理解自回归语言模型的训练目标（next token prediction）
+- 因果掩码的作用
+- 学习率调度和梯度裁剪的必要性
+
+---
+
+### 项目2：注意力可视化与模式分析（★★☆ 进阶）
+
+**目标**：可视化注意力矩阵，分析不同注意力头学到的模式。
+
+**任务**：
+1. 修改 `MultiHeadAttention` 使其返回注意力权重矩阵
+2. 在训练好的模型上输入测试文本，提取所有层所有头的注意力矩阵
+3. 可视化注意力热图（使用 matplotlib）
+4. 识别并标注不同类型的注意力模式
+
+```mermaid
+graph TB
+    subgraph "预期发现的注意力模式"
+        A["对角线模式<br/>(关注自身)"]
+        B["前一个 token 模式<br/>(Previous Token Head)"]
+        C["模式匹配<br/>(Induction Head)"]
+        D["全局关注<br/>(BOS/特殊 token)"]
+    end
+```
+
+**分析方向**：
+- 浅层 vs 深层注意力模式有何差异？
+- 能否找到 Induction Head（Anthropic 发现的关键模式）？
+- 不同头的注意力熵分布如何？（高熵 = 分散注意力，低熵 = 集中关注）
+
+---
+
+### 项目3：Pre-Norm vs Post-Norm 对比实验（★★★ 挑战）
+
+**目标**：通过控制变量实验，验证 Pre-Norm 和 Post-Norm 在训练稳定性和性能上的差异。
+
+**实验设计**：
+
+```mermaid
+graph TB
+    subgraph "实验矩阵"
+        A["模型深度: 4层 vs 8层 vs 12层"]
+        B["归一化位置: Pre-Norm vs Post-Norm"]
+        C["归一化方法: LayerNorm vs RMSNorm"]
+    end
+
+    subgraph "观测指标"
+        D["训练损失曲线"]
+        E["梯度范数（各层）"]
+        F["训练稳定性（是否需要 warmup）"]
+        G["最终验证集性能"]
+    end
+
+    A --> D
+    B --> D
+    C --> D
+```
+
+**核心实验**：
+1. 实现 Post-Norm 版本的 `TransformerBlock`
+2. 固定所有超参数，只改变归一化策略
+3. 记录训练过程中每层的梯度范数
+4. 分析：Post-Norm 在深层模型中是否出现梯度消失/爆炸？
+5. 验证：Pre-Norm 是否真的不需要 learning rate warmup？
+
+**预期发现**：
+- Post-Norm 在 12 层模型上可能训练不稳定
+- Pre-Norm 的梯度范数在各层间更均匀
+- RMSNorm 比 LayerNorm 速度更快，性能相当
+
+---
+
+### 项目4：SwiGLU vs GELU 激活函数对比（★★★ 挑战）
+
+**目标**：在相同参数预算下，对比 SwiGLU 和标准 GELU FFN 的效果差异。
+
+**实验设计**：
+1. 控制总参数量相同（SwiGLU 的 d_ff 调整为 8d/3）
+2. 在相同数据上训练两种模型
+3. 对比训练速度、收敛速度、最终性能
+
+**进阶任务**：
+- 实现 GeGLU（GELU + GLU 门控）并加入对比
+- 分析门控机制的稀疏激活特性（统计门控值的分布）
+- 可视化 FFN 层的激活模式
+
+**关键代码**：
+
+```python
+# 实现 GeGLU
+class GeGLU(nn.Module):
+    def forward(self, x):
+        gate = F.gelu(self.w_gate(x))  # GELU 门控
+        up = self.w_up(x)
+        return self.w_down(gate * up)
+```
+
+**预期发现**：
+- SwiGLU 在相同参数量下优于标准 GELU FFN
+- 门控值呈现稀疏分布（大部分接近 0）
+- GLU 系列的收敛速度通常更快
 
 ---
 
@@ -964,6 +1237,8 @@ if __name__ == "__main__":
 3. **Layer Norm**：Pre-Norm比Post-Norm更稳定
 4. **RMSNorm**：LayerNorm的简化版，被现代LLM采用
 5. **SwiGLU**：门控激活函数，效果优于GELU
+6. **Induction Heads**：Anthropic发现的上下文学习核心机制
+7. **MLA**：DeepSeek的低秩KV压缩，约57倍推理效率提升
 
 ### 数学要点
 
@@ -977,6 +1252,7 @@ if __name__ == "__main__":
 2. RoPE在注意力层内部应用
 3. 权重绑定可减少参数量
 4. 初始化很重要：Xavier或正态分布
+5. 完整代码见 `code/transformer/` 目录（attention.py, normalization.py, feedforward.py, block.py, model.py）
 
 ---
 
@@ -988,11 +1264,15 @@ if __name__ == "__main__":
 2. Ba et al. (2016). *Layer Normalization*.
 3. Zhang & Sennrich (2019). *Root Mean Square Layer Normalization*.
 4. Shazeer (2020). *GLU Variants Improve Transformer*.
+5. Elhage et al. (2021). *A Mathematical Framework for Transformer Circuits*. Anthropic.
+6. Olsson et al. (2022). *In-context Learning and Induction Heads*. Anthropic.
+7. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model*.
 
 ### 博客
 
 1. [The Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/)
 2. [The Annotated Transformer](https://nlp.seas.harvard.edu/annotated-transformer/)
+3. [Transformer Circuits Thread](https://transformer-circuits.pub/) - Anthropic
 
 ---
 
