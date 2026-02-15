@@ -2,6 +2,27 @@
 
 > 现代大语言模型几乎全部采用 Decoder-Only 架构。本章将从自回归语言模型的数学原理出发，逐步解析 GPT、Llama、Gemma 三大系列的架构设计，并从零实现一个可配置的 mini-GPT 模型。
 
+### 本模块在学习路径中的位置
+
+```mermaid
+graph LR
+    A["模块 3<br/>Transformer<br/>自注意力与架构设计"] --> B["<b>模块 4</b><br/><b>Decoder-Only 架构</b><br/>GPT / Llama / Gemma"]
+    B --> C["模块 5<br/>注意力机制进阶<br/>MHA/MQA/GQA/MLA"]
+    B --> D["模块 6<br/>MoE 混合专家<br/>稀疏激活架构"]
+
+    style A fill:#e3f2fd,stroke:#1565c0
+    style B fill:#fff9c4,stroke:#f9a825,stroke-width:3px
+    style C fill:#e8f5e9,stroke:#2e7d32
+    style D fill:#e8f5e9,stroke:#2e7d32
+```
+
+**前置知识**：
+- Transformer 的完整理解（模块 3）：自注意力、多头注意力、FFN、LayerNorm/RMSNorm、残差连接
+- 交叉熵损失与 Softmax（模块 3）
+- RoPE 旋转位置编码的基本原理（模块 2）
+
+**本模块的核心问题**：为什么 Decoder-Only 架构最终成为 LLM 的主流选择？从 2018 年 GPT-1 到 2024 年的 Llama 3 和 Gemma 2，Decoder-Only 架构经历了哪些关键演进？这些演进背后的技术逻辑和工程权衡是什么？
+
 ---
 
 ## 目录
@@ -14,8 +35,11 @@
 - [6. 完整实现：可配置 mini-GPT](#6-完整实现可配置-mini-gpt)
 - [7. 文本生成策略](#7-文本生成策略)
 - [8. 三条技术线的架构实践](#8-三条技术线的架构实践)
-- [9. 项目实践](#9-项目实践)
-- [10. 本章小结](#10-本章小结)
+- [9. 从 GPT-1 到 Llama 3：架构演进详解](#9-从-gpt-1-到-llama-3架构演进详解)
+- [10. 为什么 Decoder-Only 胜出？深层分析](#10-为什么-decoder-only-胜出深层分析)
+- [11. 项目实践](#11-项目实践)
+- [12. 本章小结](#12-本章小结)
+- [13. 章节衔接：下一步去哪里？](#13-章节衔接下一步去哪里)
 
 ---
 
@@ -933,9 +957,187 @@ Anthropic 虽然不以架构创新著称，但其 **Transformer Circuits** 研�
 
 ---
 
-## 9. 项目实践
+## 9. 从 GPT-1 到 Llama 3：架构演进详解
 
-### 项目 1：搭建一个可配置的 mini-GPT（入门）
+上面各节分别介绍了 GPT、Llama、Gemma 三大系列的核心设计。本节将它们放在同一个时间轴上，梳理 Decoder-Only 架构从 2018 年至今的**关键演进脉络**。
+
+### 9.1 GPT 系列：从 117M 到 175B 的范式转变
+
+```mermaid
+graph LR
+    subgraph "GPT 系列演进"
+        G1["GPT-1 (2018)<br/>117M<br/>预训练+微调"] --> G2["GPT-2 (2019)<br/>1.5B<br/>Pre-Norm<br/>Zero-shot"]
+        G2 --> G3["GPT-3 (2020)<br/>175B<br/>稀疏注意力<br/>Few-shot/ICL"]
+        G3 --> G4["GPT-4 (2023)<br/>推测: MoE<br/>多模态"]
+    end
+
+    style G1 fill:#e3f2fd
+    style G2 fill:#bbdefb
+    style G3 fill:#90caf9
+    style G4 fill:#64b5f6
+```
+
+每一代 GPT 的关键变化：
+
+| 变化维度 | GPT-1 → GPT-2 | GPT-2 → GPT-3 | GPT-3 → GPT-4 |
+|---------|---------------|---------------|---------------|
+| **参数规模** | 117M → 1.5B（~13x） | 1.5B → 175B（~117x） | 175B → 推测 >1T（MoE） |
+| **训练数据** | BooksCorpus (5GB) → WebText (40GB) | WebText → 融合数据 (570GB) | 融合 → 更大规模多模态数据 |
+| **关键架构改动** | Post-Norm → Pre-Norm；BPE → Byte-level BPE | 稀疏注意力（交替层） | 推测引入 MoE；多模态编码器 |
+| **核心涌现能力** | 迁移学习 | Zero-shot 任务完成 | 强 ICL、复杂推理、多模态理解 |
+| **训练范式** | 预训练+微调 | 纯预训练 Zero-shot | Few-shot ICL + RLHF |
+
+### 9.2 Llama 系列：Meta 的开源架构改进路径
+
+```mermaid
+graph LR
+    subgraph "Llama 系列演进"
+        L1["Llama 1 (2023.2)<br/>7B/13B/33B/65B<br/>RoPE+SwiGLU+RMSNorm"] --> L2["Llama 2 (2023.7)<br/>7B/13B/70B<br/>+GQA, 4K上下文"]
+        L2 --> L3["Llama 3 (2024.4)<br/>8B/70B/405B<br/>128K词汇表, 128K上下文"]
+    end
+
+    style L1 fill:#e8f5e9
+    style L2 fill:#c8e6c9
+    style L3 fill:#a5d6a7
+```
+
+**Llama 1 的关键决策**：
+- **RoPE 替代学习的绝对 PE**：相对位置编码具备更好的长度外推能力，且不增加可学习参数
+- **SwiGLU 替代 GELU**：门控激活函数在同参数量下提供更好的性能（Shazeer 2020 的实验验证）
+- **RMSNorm 替代 LayerNorm**：去除均值中心化操作，计算效率提升约 10-15%，且大规模下性能无损
+- **去除 bias**：减少参数量的同时简化实现，大模型下对性能无明显影响
+- **"过度训练"策略**：7B 模型使用 1T tokens 训练，远超 Chinchilla 最优比例
+
+**Llama 2 的改进**：
+- **引入 GQA**：70B 模型使用 8 个 KV 头（对比 64 个 Q 头），KV Cache 减少 8 倍
+- **更长上下文**：从 2048 扩展到 4096，RoPE 基底频率不变（10000）
+- **更多训练数据**：从 1T 增加到 2T tokens
+- **安全微调**：引入 RLHF + Red Teaming 的后训练流程（发布了 Chat 版本）
+
+**Llama 3 的关键改进**：
+- **128K 词汇表**：从 32K 大幅扩展，显著改善多语言和代码 token 化效率。更大的词汇表意味着同一段文本被编码为更少的 token，减少了推理步数
+- **128K 上下文窗口**：RoPE 基底频率从 10000 增大到 500000，支持极长序列。配合渐进式长度扩展训练
+- **15T+ tokens 训练**：极端过度训练策略，8B 模型使用了约 19 倍 Chinchilla 最优数据量
+- **GQA 配置微调**：保持 8 个 KV 头的配置，证明了这一比例在多种规模下的有效性
+
+### 9.3 Google Gemma 系列
+
+```mermaid
+graph LR
+    subgraph "Gemma 系列演进"
+        GM1["Gemma 1 (2024.2)<br/>2B/7B<br/>基于 Gemini 技术"] --> GM2["Gemma 2 (2024.6)<br/>2B/9B/27B<br/>局部+全局注意力混合"]
+    end
+
+    style GM1 fill:#fff3e0
+    style GM2 fill:#ffe0b2
+```
+
+- **Gemma 1**：基于 Gemini 技术的首个开源模型，架构上与 Llama 相似（RoPE + RMSNorm + GeGLU），独特之处在于 256K 大词汇表和嵌入缩放（$\sqrt{d_{model}}$）
+- **Gemma 2**：引入了**局部注意力 + 全局注意力交替**的创新设计。偶数层使用滑动窗口注意力（$O(nw)$ 复杂度），奇数层使用完整注意力（$O(n^2)$ 复杂度），在效率和长距离建模能力之间取得平衡。此外还引入了 Logit 软截断和知识蒸馏训练
+- **与 Llama 的关键差异**：Gemma 选择了更大的词汇表（256K vs 128K）、不同的 GLU 变体（GeGLU vs SwiGLU）、以及独特的注意力模式交替策略
+
+### 9.4 DeepSeek 系列
+
+```mermaid
+graph LR
+    subgraph "DeepSeek 系列演进"
+        D1["DeepSeek-V1 (2024.1)<br/>Dense 67B<br/>标准 Llama 风格"] --> D2["DeepSeek-V2 (2024.5)<br/>236B 总参数 / 21B 活跃<br/>MLA + MoE"]
+        D2 --> D3["DeepSeek-V3 (2024.12)<br/>671B 总参数 / 37B 活跃<br/>FP8 + DualPipe"]
+    end
+
+    style D1 fill:#fce4ec
+    style D2 fill:#f8bbd0
+    style D3 fill:#f48fb1
+```
+
+- **DeepSeek-V1**：标准 Dense Decoder-Only 架构，验证了高质量中英混合数据的重要性
+- **DeepSeek-V2**：两大架构创新——**MLA（Multi-head Latent Attention）** 将 KV Cache 压缩约 28 倍；**细粒度 MoE** 配合共享专家实现稀疏激活
+- **DeepSeek-V3**：在 V2 基础上进一步创新——**FP8 混合精度训练**节省显存和提升速度；**DualPipe 流水线**实现计算与通信的高度重叠；**辅助损失 free** 的路由策略；**多 token 预测**头（为 Speculative Decoding 铺路）
+
+### 9.5 横向对比：各模型关键参数选择
+
+| 设计维度 | GPT-3 (2020) | Llama 1 (2023) | Llama 3 (2024) | Gemma 2 (2024) | DeepSeek-V3 (2024) |
+|---------|-------------|----------------|----------------|---------------|-------------------|
+| **归一化** | LayerNorm | RMSNorm | RMSNorm | RMSNorm | RMSNorm |
+| **激活函数** | GELU | SwiGLU | SwiGLU | GeGLU | SwiGLU |
+| **位置编码** | 学习的绝对 PE | RoPE (base=10K) | RoPE (base=500K) | RoPE | RoPE |
+| **注意力** | MHA (稀疏交替) | MHA | GQA | GQA + 滑动窗口 | MLA |
+| **FFN 类型** | Dense | Dense | Dense | Dense | MoE (256专家) |
+| **词汇表** | 50K | 32K | 128K | 256K | 128K |
+| **最大上下文** | 2048 | 2048 | 128K | 8K | 128K |
+| **训练数据** | 300B tokens | 1T tokens | 15T+ tokens | 2T tokens | 14.8T tokens |
+
+**关键趋势**：
+1. **归一化和激活函数已趋同**：RMSNorm + GLU 变体（SwiGLU/GeGLU）成为标准配置
+2. **位置编码统一到 RoPE**：基底频率根据目标上下文长度调整
+3. **注意力机制持续创新**：从 MHA → GQA → MLA，核心驱动力是推理效率
+4. **词汇表大小快速增长**：32K → 128K → 256K，多语言和代码支持的需求
+5. **训练数据量指数增长**：1T → 15T，"过度训练"成为主流策略
+
+---
+
+## 10. 为什么 Decoder-Only 胜出？深层分析
+
+在 Encoder-Only（BERT）、Encoder-Decoder（T5）、Decoder-Only（GPT）三种架构中，Decoder-Only 最终成为 LLM 的主流选择。这一结果并非偶然，背后有多个层面的深层原因。
+
+### 10.1 信息论视角：因果语言建模的统一性
+
+**因果语言模型（Causal LM）** 通过链式分解 $P(x_{1:T}) = \prod_{t=1}^{T} P(x_t | x_{<t})$ 建模联合概率分布。这一分解具有数学上的优雅性：
+
+- **无需特殊标记或掩码策略**：不像 MLM 需要 `[MASK]` token，也不像 Encoder-Decoder 需要分离输入和输出
+- **统一的训练信号**：每个 token 都参与损失计算，训练效率高（对比 MLM 只在 15% 的被遮蔽位置计算损失）
+- **天然兼容生成任务**：训练目标（预测下一个词）与推理目标（生成下一个词）完全一致，没有 exposure bias 以外的训练-推理不匹配
+
+### 10.2 工程视角：自回归特性与 KV Cache 的天然契合
+
+Decoder-Only 的自回归生成天然适合 **KV Cache** 优化：
+
+```mermaid
+graph TB
+    subgraph "KV Cache 的自然适配"
+        A["Step t: 计算 token t 的 Q/K/V"] --> B["K_t, V_t 追加到 Cache"]
+        B --> C["Q_t 与 Cache 中所有 K 计算注意力"]
+        C --> D["输出 token t+1"]
+        D --> A
+    end
+```
+
+- **因果掩码保证了缓存的有效性**：位置 $t$ 的输出只依赖 $x_{<t}$，因此之前计算的 K/V 永远不需要更新
+- **Encoder-Decoder 的额外开销**：需要同时维护 Encoder 的表示和 Decoder 的 KV Cache，显存占用更高
+- **推理效率**：每个新 token 只需计算一层 Q，而非完整的 QKV，增量计算成本极低
+
+### 10.3 Scaling 视角：简单架构更容易规模化
+
+```mermaid
+graph TB
+    subgraph "架构复杂度 vs Scaling 效率"
+        S1["Encoder-Decoder<br/>两套参数<br/>交叉注意力<br/>更多超参数"] --> S3["Scaling 时需同时平衡<br/>Encoder/Decoder 的分配"]
+        S2["Decoder-Only<br/>单一参数栈<br/>统一注意力<br/>更少超参数"] --> S4["Scaling 时只需增加<br/>层数/宽度/数据量"]
+    end
+
+    style S2 fill:#e8f5e9,stroke:#2e7d32
+    style S4 fill:#e8f5e9,stroke:#2e7d32
+```
+
+- **更少的超参数选择**：不需要决定 Encoder 和 Decoder 的层数分配、交叉注意力的放置策略等
+- **Scaling Laws 更易预测**：单一架构的缩放行为更加平滑和可预测
+- **工程实现更简单**：分布式训练中，统一的 Decoder Block 更容易进行流水线和张量并行划分
+
+### 10.4 反例讨论：Encoder-Decoder 仍有价值的场景
+
+需要指出的是，Decoder-Only 的"胜出"并不意味着其他架构毫无价值：
+
+- **Google T5/UL2**：在**固定输入、固定输出格式**的任务（如翻译、摘要）上，Encoder-Decoder 仍然具备优势。Encoder 的双向注意力能更充分地理解输入，对于理解型任务效率更高
+- **小模型场景**：当参数预算有限（< 1B）时，Encoder-Decoder 的两阶段处理可能比单一 Decoder 更有效，因为 Encoder 可以对输入进行高效压缩
+- **Google 的渐进转变**：从 T5（纯 Encoder-Decoder）→ PaLM（Decoder-Only）→ Gemini（Decoder-Only + 多模态），说明即使是 Encoder-Decoder 的"发源地"也在逐渐转向 Decoder-Only
+
+**结论**：Decoder-Only 的胜出源于其在**统一性、工程简洁性和可扩展性**三个维度上的综合优势。随着模型规模增大，这些优势被不断放大，最终形成了当前的行业共识。
+
+---
+
+## 11. 项目实践
+
+### 项目 1：搭建一个可配置的 mini-GPT（入门 ⭐）
 
 **目标**：理解 Decoder-only 架构的完整组装过程。
 
@@ -980,7 +1182,7 @@ print(f"因果性验证 (应接近0): {(logits[:, :32] - logits_2[:, :32]).abs()
 
 ---
 
-### 项目 2：对比 Greedy / Top-K / Top-P 生成效果（进阶）
+### 项目 2：对比 Greedy / Top-K / Top-P 生成效果（进阶 ⭐⭐）
 
 **目标**：理解不同采样策略对生成文本的影响。
 
@@ -1012,7 +1214,7 @@ def distinct_n(tokens: list, n: int = 2) -> float:
 
 ---
 
-### 项目 3：复现 GPT-2 Small (124M) 的架构（挑战）
+### 项目 3：复现 GPT-2 Small (124M) 的架构（挑战 ⭐⭐⭐）
 
 **目标**：理解工业级模型的完整配置，并验证能否加载公开权重。
 
@@ -1053,7 +1255,7 @@ def distinct_n(tokens: list, n: int = 2) -> float:
 
 ---
 
-### 项目 4：分析 Llama 与 GPT 的参数效率差异（进阶）
+### 项目 4：分析 Llama 与 GPT 的参数效率差异（进阶 ⭐⭐）
 
 **目标**：理解现代架构改进如何提升参数效率。
 
@@ -1098,7 +1300,41 @@ $$\text{KV\_Cache}_{GQA} = 2 \times L \times S \times n_{kv} \times d_h \times \
 
 ---
 
-## 10. 本章小结
+### 项目 5：GPT-2 vs Llama 架构对比实验（进阶 ⭐⭐）
+
+**目标**：在相同参数量下实现 GPT-2 风格和 Llama 风格的模型，对比训练稳定性和最终性能，量化各组件改进的贡献。
+
+**实验设计**：
+
+```mermaid
+graph TB
+    subgraph "实验框架"
+        A["固定参数量: ~50M"] --> B["GPT-2 风格<br/>LayerNorm + GELU + MHA<br/>学习的绝对 PE + bias"]
+        A --> C["Llama 风格<br/>RMSNorm + SwiGLU + GQA<br/>RoPE + 无 bias"]
+        B --> D["相同数据集<br/>相同训练步数<br/>相同优化器"]
+        C --> D
+        D --> E["对比指标:<br/>训练损失曲线<br/>验证 PPL<br/>梯度范数稳定性"]
+    end
+```
+
+**关键提示**：
+- 使用本章的 `ModelConfig` 分别创建两种风格的配置
+- GPT-2 风格：`ffn_type="standard", norm_type="layernorm", use_rope=False, bias=True`
+- Llama 风格：`ffn_type="swiglu", norm_type="rmsnorm", use_rope=True, bias=False`
+- 注意调整 $d_{ff}$ 使两种配置的总参数量尽可能接近（SwiGLU 有 3 个矩阵，标准 FFN 有 2 个）
+- 建议使用一个小规模文本数据集（如 WikiText-2）训练 5000-10000 步
+
+**思考问题**：
+1. 两种架构在训练过程中的损失下降速度有何差异？
+2. 梯度范数的稳定性（方差）哪种更好？
+3. 如果逐个替换组件（如只把 LayerNorm 换成 RMSNorm），哪个改进对性能提升贡献最大？
+4. 固定参数量时，SwiGLU 的 $d_{ff}$ 比标准 FFN 小多少？这对模型的表达能力有何影响？
+
+**进阶拓展**：设计消融实验，每次只替换一个组件，量化各组件的独立贡献。
+
+---
+
+## 12. 本章小结
 
 ### 核心知识点
 
@@ -1106,8 +1342,10 @@ $$\text{KV\_Cache}_{GQA} = 2 \times L \times S \times n_{kv} \times d_h \times \
 2. **GPT 系列**：从预训练+微调（GPT-1）到 In-Context Learning（GPT-3）的范式演进
 3. **Llama 改进**：RMSNorm + SwiGLU + RoPE + GQA 成为现代 Decoder-only 的标准配置
 4. **Gemma 特色**：局部/全局交替注意力、Logit 软截断、大词汇表（256K）
-5. **参数量公式**：$P \approx 12Ld^2$，FLOPs $\approx 6PD$
-6. **生成策略**：Greedy / Top-K / Top-P / Temperature 各有适用场景
+5. **DeepSeek 创新**：MLA + MoE 的组合实现了极致的推理效率
+6. **参数量公式**：$P \approx 12Ld^2$，FLOPs $\approx 6PD$
+7. **生成策略**：Greedy / Top-K / Top-P / Temperature 各有适用场景
+8. **Decoder-Only 胜出的原因**：统一性（信息论）、KV Cache 契合（工程）、简单可扩展（Scaling）
 
 ### 数学要点
 
@@ -1141,6 +1379,9 @@ $$\text{KV\_Cache}_{GQA} = 2 \times L \times S \times n_{kv} \times d_h \times \
 9. Shazeer (2020). *GLU Variants Improve Transformer*.
 10. Su et al. (2021). *RoFormer: Enhanced Transformer with Rotary Position Embedding*. (RoPE)
 11. Ainslie et al. (2023). *GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints*.
+12. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient MoE Language Model*.
+13. DeepSeek-AI (2024). *DeepSeek-V3 Technical Report*.
+14. Wang et al. (2022). *What Language Model Architecture and Pretraining Objective Work Best for Zero-Shot Generalization?*
 
 ### 博客与资源
 
@@ -1150,4 +1391,38 @@ $$\text{KV\_Cache}_{GQA} = 2 \times L \times S \times n_{kv} \times d_h \times \
 
 ---
 
-**下一章预告**：[模块5: 注意力机制进阶](../05_attention/README.md) - 深入分析 MHA / MQA / GQA / MLA 的数学原理与效率权衡。
+## 13. 章节衔接：下一步去哪里？
+
+本模块建立了对 Decoder-Only 架构的全面理解。接下来有两条自然的延伸路径：
+
+### 通往模块 5：注意力机制进阶
+
+本模块中，我们已经看到注意力机制从 **MHA → GQA → MLA** 的演进。但这背后有一个核心工程瓶颈尚未深入：
+
+**标准 MHA 在大模型中的效率问题**：
+- KV Cache 显存占用随 $n_h \times d_h \times S$ 线性增长。以 Llama 2 70B 为例（$n_h=64$, $d_h=128$, $L=80$），一个 4K 序列的 KV Cache 占用约 **5GB**（FP16），128K 序列则需要 **160GB**
+- 这直接限制了批大小和上下文长度，推理吞吐量成为瓶颈
+- GQA 通过减少 KV 头数部分缓解了问题，但 DeepSeek 的 MLA 走了一条更激进的低秩压缩路线
+
+**模块 5 将详细解答**：MHA / MQA / GQA / MLA 的完整数学推导、KV Cache 的精确显存分析、以及各方案的效率-质量权衡。
+
+### 通往模块 6：MoE 混合专家
+
+本模块讨论的所有模型都是 **Dense** 架构——每个 token 都要经过所有参数的计算。这导致了一个根本性问题：
+
+**参数量与计算量的绑定**：
+- Dense 模型的 FLOPs $\approx 2P$（每个 token），参数量增大必然导致计算量增大
+- DeepSeek-V3 的解决方案：671B 总参数，但每个 token 只激活 37B（5.5%），通过 MoE 实现参数和计算的解耦
+- 这使得模型可以拥有更大的"知识容量"（更多参数），同时保持可控的推理成本
+
+**模块 6 将详细解答**：MoE 的路由机制、负载均衡问题、DeepSeekMoE 的细粒度专家设计、以及 MoE 的 Scaling Laws。
+
+```mermaid
+graph LR
+    A["本模块<br/>Decoder-Only 架构<br/>(Dense, MHA)"] --> B["模块 5: 注意力进阶<br/>解决 KV Cache 效率问题<br/>MHA → GQA → MLA"]
+    A --> C["模块 6: MoE<br/>解决参数-计算绑定问题<br/>Dense → Sparse"]
+
+    style A fill:#fff9c4,stroke:#f9a825,stroke-width:2px
+    style B fill:#e8f5e9,stroke:#2e7d32
+    style C fill:#e8f5e9,stroke:#2e7d32
+```
