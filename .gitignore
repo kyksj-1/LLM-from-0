@@ -49,6 +49,7 @@ models/
 
 # Data
 data/
+!final_project/src/data/
 *.pkl
 *.pickle
 *.h5
