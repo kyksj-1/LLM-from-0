@@ -2,6 +2,24 @@
 
 > 分词是LLM的第一道门：将连续的文本流切分为离散的词元序列。这看似简单的操作，却深刻影响着模型的词汇量、序列长度、泛化能力和推理效率。本章将深入分词算法的数学原理，并从零实现工业级分词器。
 
+### 本章定位
+
+分词是 LLM 处理流水线的**绝对起点**。无论模型架构多么精妙、训练多么充分，如果文本没有被恰当地切分为词元（tokens），一切都无从谈起。分词器决定了模型"看到"什么——它是连接人类自然语言世界与模型数字世界的桥梁。本章将从数学原理出发，系统讲解 BPE、WordPiece、Unigram 三大主流算法，并从零实现工业级的 BPE 分词器。掌握本章内容后，你将理解为什么不同模型选择不同的分词策略，以及分词粒度如何影响下游的嵌入、注意力计算和推理成本。
+
+```mermaid
+graph LR
+    M0["模块0<br/>LLM全景图"] --> M1
+    M1["<b>模块1: Tokenization</b><br/>（当前模块）"]
+    M1 --> M2["模块2<br/>Embedding与位置编码"]
+    M2 --> M3["模块3<br/>Transformer架构"]
+    M3 --> M4["模块4<br/>Decoder-only架构"]
+
+    M1 -.->|"分词结果作为<br/>Embedding的输入"| M2
+    M2 -.->|"嵌入向量作为<br/>Transformer的输入"| M3
+
+    style M1 fill:#ff9,stroke:#333,stroke-width:3px
+```
+
 ---
 
 ## 目录
@@ -13,8 +31,10 @@
 - [5. Unigram Language Model](#5-unigram-language-model)
 - [6. SentencePiece：Google的工业实践](#6-sentencepiecegoogle的工业实践)
 - [7. 现代LLM的分词策略](#7-现代llm的分词策略)
-- [8. 从零实现BPE分词器](#8-从零实现bpe分词器)
-- [9. 项目实践](#9-项目实践)
+- [8. 工业界分词器选型指南](#8-工业界分词器选型指南)
+- [9. 多语言分词挑战](#9-多语言分词挑战)
+- [10. 从零实现BPE分词器](#10-从零实现bpe分词器)
+- [11. 项目实践](#11-项目实践)
 
 ---
 
@@ -747,9 +767,205 @@ $$\text{Trade-off}: |V| \uparrow \Rightarrow \begin{cases} \text{序列长度} \
 
 ---
 
-## 8. 从零实现BPE分词器
+## 8. 工业界分词器选型指南
 
-### 8.1 完整实现
+在实际项目中选择分词器时，需要综合考虑模型规模、目标语言、部署环境等因素。本节提供一个系统化的选型框架。
+
+### 8.1 三大算法的适用场景
+
+| 选型因素 | 推荐 BPE | 推荐 WordPiece | 推荐 Unigram LM |
+|----------|----------|----------------|------------------|
+| **任务类型** | 文本生成、对话、代码 | 文本理解、分类、NER | 翻译、多语言任务 |
+| **模型架构** | Decoder-only（GPT/Llama） | Encoder-only（BERT） | Encoder-Decoder（T5） |
+| **训练数据规模** | 大规模（>100GB） | 中小规模（<100GB） | 任意规模 |
+| **多语言需求** | 搭配 Byte-level 使用 | 需要语言特定预处理 | 天然支持多语言 |
+| **概率化分词** | 不支持 | 不支持 | 支持（子词正则化） |
+| **工程成熟度** | 最高（Tiktoken/HF） | 高（HuggingFace） | 高（SentencePiece） |
+
+### 8.2 选型决策树
+
+```mermaid
+graph TB
+    A{目标任务?} -->|文本生成/对话| B{需要多语言?}
+    A -->|文本理解/分类| C{是否使用BERT系列?}
+    A -->|机器翻译| D[Unigram LM<br/>SentencePiece]
+
+    B -->|是| E{代码混合?}
+    B -->|否| F[BPE<br/>32K-50K词汇量]
+
+    E -->|是| G[Byte-level BPE<br/>100K-128K词汇量]
+    E -->|否| H[BPE + Byte fallback<br/>64K-100K词汇量]
+
+    C -->|是| I[WordPiece<br/>30K词汇量]
+    C -->|否| J{数据量>100GB?}
+
+    J -->|是| K[BPE<br/>50K-100K词汇量]
+    J -->|否| L[Unigram LM<br/>32K词汇量]
+```
+
+### 8.3 工程框架选择
+
+在确定算法后，还需要选择具体的工程实现框架：
+
+| 框架 | 开发者 | 支持算法 | 训练速度 | 推理速度 | 特点 |
+|------|--------|----------|----------|----------|------|
+| **SentencePiece** | Google | BPE, Unigram | 快 | 快 | C++实现，语言无关，工业标准 |
+| **Tiktoken** | OpenAI | BPE | N/A（仅编码） | 极快 | Rust+Python，仅支持编码，不支持训练 |
+| **HuggingFace Tokenizers** | HuggingFace | BPE, WordPiece, Unigram | 快 | 快 | Rust实现，与HF生态无缝集成 |
+| **自定义实现** | - | 任意 | 慢 | 取决于实现 | 完全可控，适合研究和教学 |
+
+**推荐策略**：
+- 如果从零训练模型：使用 **SentencePiece** 训练 + 导出
+- 如果使用现有模型：使用 **HuggingFace Tokenizers** 加载预训练分词器
+- 如果需要与 GPT/Claude API 对齐 token 计数：使用 **Tiktoken**
+
+### 8.4 词汇量选择的量化分析
+
+词汇量 $|V|$ 的选择涉及以下几个可量化的 trade-off：
+
+**1. Embedding 参数开销**：
+
+$$\text{Embedding参数} = |V| \times d_{\text{model}}$$
+
+对于 $d_{\text{model}} = 4096$ 的模型：
+- 32K 词表: $32,000 \times 4,096 = 131M$ 参数
+- 128K 词表: $128,000 \times 4,096 = 524M$ 参数
+- 256K 词表: $256,000 \times 4,096 = 1,049M$ 参数
+
+**2. 序列长度与计算量**：
+
+假设原始文本长度固定为 $L$ 个字符，压缩率为 $r$ (chars/token)：
+
+$$\text{序列长度} = \frac{L}{r}$$
+
+$$\text{注意力计算量} \propto \left(\frac{L}{r}\right)^2$$
+
+因此，压缩率提高 $k$ 倍，注意力计算量减少 $k^2$ 倍。
+
+**3. 低频 token 的学习问题**：
+
+词汇量越大，出现频率极低的 token 越多。这些低频 token 的 Embedding 在训练中得不到充分更新，可能成为"死参数"。经验上，训练数据中每个 token 至少出现 100 次才能获得有意义的 Embedding。
+
+---
+
+## 9. 多语言分词挑战
+
+多语言分词是工业界面临的核心难题之一。不同语言的书写系统、词边界定义、字符编码方式存在巨大差异，这对统一的分词器设计提出了严峻挑战。
+
+### 9.1 CJK 字符的分词困境
+
+中文（Chinese）、日文（Japanese）、韩文（Korean）统称 CJK 字符集，它们与欧洲语言有本质区别：
+
+| 特性 | 英文 | 中文 | 日文 | 韩文 |
+|------|------|------|------|------|
+| **词边界** | 空格分隔 | 无天然分隔 | 混合（假名无分隔） | 空格分隔（但不严格） |
+| **字符集大小** | 26个字母 | ~6,700常用汉字 | ~2,000假名+汉字 | ~11,000谚文音节 |
+| **UTF-8编码** | 1字节/字符 | 3字节/字符 | 2-3字节/字符 | 3字节/字符 |
+| **语素粒度** | 词级(word) | 字级(character) | 混合 | 音节级(syllable) |
+
+**BPE 在中文上的行为分析**：
+
+对于 Byte-level BPE：
+1. 每个汉字首先被拆为 3 个 UTF-8 字节
+2. BPE 需要多轮合并才能恢复完整的汉字
+3. 高频汉字（如"的"、"是"、"了"）会较早被合并为整体
+4. 低频汉字可能始终以字节表示，占用更多 token
+
+$$\text{中文压缩率}_{\text{ByteBPE}} \leq \text{中文压缩率}_{\text{CharBPE}}$$
+
+**字符级 BPE 在中文上的优势**：
+- 初始词汇表已包含所有常用汉字（~6,700个）
+- 合并操作直接在汉字级别进行
+- 能更快学到有意义的词（如"人工"+"智能"→"人工智能"）
+
+### 9.2 低资源语言的分词策略
+
+对于训练数据有限的语言（如斯瓦希里语、泰米尔语、藏语等），分词面临特殊挑战：
+
+**问题**：
+1. 语料不足导致 BPE 无法学到有意义的子词
+2. 词汇表中该语言的 token 占比过低
+3. 分词粒度过细，序列过长
+
+**解决方案**：
+
+1. **提高字符覆盖率**（`character_coverage`）：确保 Unicode 中该语言的字符被覆盖
+
+```python
+# SentencePiece 训练时提高覆盖率
+spm.SentencePieceTrainer.train(
+    input='multilingual_corpus.txt',
+    character_coverage=0.99995,  # 比默认的 0.9995 更高
+    # ...
+)
+```
+
+2. **语料上采样**：在混合语料中增加低资源语言的比例
+
+$$P_{\text{sample}}(l) = \frac{p_l^\alpha}{\sum_{l'} p_{l'}^\alpha}, \quad \alpha < 1$$
+
+其中 $p_l$ 是语言 $l$ 的原始比例，$\alpha = 0.7$ 是常用的平滑指数（XLM-R 使用此策略）。
+
+3. **Byte fallback**：确保即使词汇表未覆盖，也能通过字节级别处理
+
+### 9.3 代码混合文本的分词
+
+代码文本（Python、JavaScript、SQL 等）与自然语言文本有显著不同的统计特性：
+
+```
+自然语言: "这个函数计算两个向量的余弦相似度"
+代码文本: "def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:"
+混合文本: "使用 cosine_similarity 函数计算 embedding 的相似度"
+```
+
+**代码分词的特殊需求**：
+
+1. **保留缩进**：Python 等语言中缩进有语法含义，空格不能被合并
+2. **标识符拆分**：`cosine_similarity` 是否应拆为 `cosine` + `_` + `similarity`？
+3. **数字处理**：`3.14159` 应作为整体还是拆分？
+4. **特殊符号**：`->`, `!=`, `**` 等运算符应作为整体
+
+**工业实践**：
+
+| 模型 | 代码分词策略 |
+|------|-------------|
+| **Codex/GPT-4** | 空格编码为专用 token（`Ġ` 系列），保留缩进信息 |
+| **DeepSeek-Coder** | 代码关键词整体编码，缩进用专用 token 表示 |
+| **CodeLlama** | 继承 Llama 分词器 + 代码语料 BPE 合并 |
+| **StarCoder** | Byte-level BPE，50K 词表，充分覆盖代码语法 |
+
+### 9.4 多语言分词的评估指标
+
+评估多语言分词器质量，需要关注以下跨语言指标：
+
+**1. 跨语言 Fertility 比较**：
+
+$$\text{Fertility}(l) = \frac{\text{该语言的平均 token 数}}{\text{该语言的平均词数}}$$
+
+理想情况下，所有语言的 Fertility 应接近，表示分词器在各语言上的压缩率均衡。
+
+**2. 语言间压缩率差异**：
+
+$$\text{Compression Gap} = \max_l \text{Fertility}(l) - \min_l \text{Fertility}(l)$$
+
+该值越小，表示分词器的多语言能力越均衡。
+
+**3. 实际模型对比**：
+
+| 模型 | 英文 Fertility | 中文 Fertility | 日文 Fertility | 压缩差距 |
+|------|---------------|---------------|---------------|----------|
+| Llama 2 (32K) | ~1.3 | ~2.5 | ~3.0 | ~1.7 |
+| Llama 3 (128K) | ~1.1 | ~1.5 | ~1.8 | ~0.7 |
+| DeepSeek (100K) | ~1.2 | ~1.3 | ~2.0 | ~0.8 |
+| Gemma (256K) | ~1.0 | ~1.2 | ~1.4 | ~0.4 |
+
+> **观察**：更大的词汇表通常能显著缩小跨语言压缩率差距，但存在边际效益递减。
+
+---
+
+## 10. 从零实现BPE分词器
+
+### 10.1 完整实现
 
 ```python
 """
@@ -994,7 +1210,7 @@ if __name__ == "__main__":
     print(f"解码: {decoded}")
 ```
 
-### 8.2 Byte-level BPE实现
+### 10.2 Byte-level BPE实现
 
 ```python
 """
@@ -1059,7 +1275,7 @@ class ByteBPETokenizer(BPETokenizer):
 
 ---
 
-## 9. 项目实践
+## 11. 项目实践
 
 > 以下项目按难度递增排列。项目采用**开放式设计**，只提供思路和关键引导，鼓励读者独立实现。
 
@@ -1214,6 +1430,92 @@ graph TB
 
 ---
 
+### 项目5：多语言分词器对比实验（★★☆ 进阶）
+
+**目标**：比较不同分词策略在中英文混合文本上的分词质量，理解多语言分词的工程挑战。
+
+**任务**：
+1. 准备中英文混合测试集（至少包含以下场景）：
+   - 纯中文段落
+   - 纯英文段落
+   - 中英混合句（如"这个 model 的 performance 很好"）
+   - 含代码的技术文档
+   - 含数字和标点的混合文本
+2. 使用至少 3 种分词策略进行对比：
+   - 策略A：Byte-level BPE（GPT-2 风格，50K 词表）
+   - 策略B：字符级 BPE + 中文预分词（Llama 风格，32K 词表）
+   - 策略C：SentencePiece Unigram（T5 风格，32K 词表）
+3. 计算并对比以下指标：
+   - 中文压缩率 vs 英文压缩率
+   - 混合文本中的 token 数量
+   - 中文词边界准确率（与 jieba 分词对比）
+   - 跨语言 Fertility 差距
+
+**实验框架**：
+```python
+import sentencepiece as spm
+from collections import Counter
+
+def multilingual_tokenizer_comparison(test_texts: dict):
+    """
+    多语言分词对比实验框架
+
+    Args:
+        test_texts: {
+            'chinese': [...],      # 纯中文句子列表
+            'english': [...],      # 纯英文句子列表
+            'mixed': [...],        # 中英混合句子列表
+            'code_mixed': [...],   # 含代码的混合文本列表
+        }
+    """
+    results = {}
+
+    # 分词器 A: Byte-level BPE (使用 tiktoken 或 HuggingFace)
+    # tokenizer_a = load_byte_bpe_tokenizer()
+
+    # 分词器 B: 字符级 BPE (使用 SentencePiece)
+    # tokenizer_b = load_char_bpe_tokenizer()
+
+    # 分词器 C: Unigram (使用 SentencePiece)
+    # tokenizer_c = load_unigram_tokenizer()
+
+    for name, tokenizer in [('ByteBPE', tokenizer_a),
+                             ('CharBPE', tokenizer_b),
+                             ('Unigram', tokenizer_c)]:
+        for lang, texts in test_texts.items():
+            tokens_list = [tokenizer.encode(t) for t in texts]
+            avg_tokens = sum(len(t) for t in tokens_list) / len(tokens_list)
+            avg_chars = sum(len(t) for t in texts) / len(texts)
+            compression = avg_chars / avg_tokens
+
+            results[(name, lang)] = {
+                'avg_tokens': avg_tokens,
+                'compression_ratio': compression,
+                'fertility': avg_tokens / count_words(texts, lang),
+            }
+
+    return results
+```
+
+**评估维度**：
+
+| 指标 | 计算方式 | 反映的问题 |
+|------|----------|-----------|
+| 中文压缩率 | `中文字符数 / 中文token数` | 中文编码效率 |
+| 英文压缩率 | `英文字符数 / 英文token数` | 英文编码效率 |
+| 中英压缩率比 | `中文压缩率 / 英文压缩率` | 跨语言均衡性（越接近1越好） |
+| 混合文本 token 膨胀率 | `混合token数 / (中文+英文单独token数)` | 语言切换的开销 |
+| 中文语义保持率 | `与jieba分词的词边界重合率` | 中文语义切分的合理性 |
+
+**预期发现**：
+- Byte-level BPE 在中文上压缩率较低（因为 UTF-8 编码开销），但跨语言一致性最好
+- 字符级 BPE 在中文上压缩率更高，但可能在英文上略逊
+- Unigram LM 通过概率模型可能在混合文本上表现更平衡
+
+**预期产出**：多语言分词对比报告 + 可视化图表（压缩率柱状图、Fertility 对比图）。
+
+---
+
 ## 本章小结
 
 ### 核心知识点
@@ -1260,3 +1562,7 @@ graph TB
 ---
 
 **下一章预告**：[模块2: Embedding与位置编码](../02_embedding/README.md) - 我们将深入词嵌入和位置编码的数学原理，重点讲解RoPE旋转位置编码的实现。
+
+### 从词元到向量：迈向模型的内部世界
+
+分词器将文本切分为词元序列后，下一个问题是：**模型如何理解每个词元的含义？**答案是嵌入（Embedding）——将每个离散的词元 ID 映射为一个连续的高维向量。但仅有词的语义是不够的，模型还需要知道词元在序列中的**位置信息**（否则"猫吃鱼"和"鱼吃猫"对模型来说毫无区别）。在模块 2 中，你将学习词嵌入的数学原理，理解从最初的正弦位置编码到 RoPE 旋转位置编码的演进，并亲手实现这些关键组件。分词器的输出是嵌入层的输入——这两个模块的衔接构成了 LLM 数据处理流水线的最前端。
