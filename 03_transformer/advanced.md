@@ -360,6 +360,229 @@ $$y(t) = Ch(t) + Dx(t)$$
 - 残差连接提供了"信息高速公路"，使深层网络可训练
 - Layer Norm/RMSNorm 对梯度方向进行了隐式正则化
 
+### 4.5 Transformer 作为通用近似器：理论深度分析
+
+#### 图灵完备性
+
+Pérez et al. (2021) 证明了一个关键理论结果：**具有无限精度的 Transformer 是图灵完备的**。
+
+**定理**（非正式表述）：对于任何图灵机 $M$，存在一个 Transformer 模型 $T$，使得 $T$ 可以模拟 $M$ 的任何计算。
+
+**证明关键步骤**：
+
+1. **编码**：将图灵机的带（tape）内容编码为序列中 token 的嵌入向量
+2. **状态转移**：用注意力头实现模式匹配（找到当前读写头位置），用 FFN 实现状态转移函数
+3. **读写**：通过残差连接更新对应位置的表示
+
+**实际意义与局限**：
+
+| 理论 | 实际 |
+|------|------|
+| 无限精度 | 有限浮点精度（FP16/BF16） |
+| 无限深度/宽度 | 有限层数和维度 |
+| 任意长输入 | 有限上下文窗口 |
+| 无限计算步骤 | 固定的前向传播步数 |
+
+尽管实际 Transformer 无法真正实现图灵完备，但这一理论结果说明了 Transformer 架构的**表达能力没有根本性限制**——性能瓶颈主要来自有限的规模和训练数据。
+
+#### 通用近似定理
+
+Yun et al. (2020) 证明了 Transformer 的**通用近似能力**：
+
+**定理**：对于任何连续的序列到序列函数 $f: \mathbb{R}^{n \times d} \to \mathbb{R}^{n \times d}$ 和任意精度 $\epsilon > 0$，存在一个 Transformer 网络 $T$ 使得：
+
+$$\sup_{X \in \mathcal{K}} \|T(X) - f(X)\| < \epsilon$$
+
+其中 $\mathcal{K}$ 是紧集。
+
+**关键条件**：
+- 需要足够的深度（层数）或宽度（FFN 隐藏维度）
+- Self-Attention 提供了**全局交互**能力，这是全连接网络不具备的
+
+**与 MLP 通用近似的区别**：
+
+MLP 的通用近似定理只适用于固定长度的输入/输出。Transformer 的近似能力覆盖了**可变长度序列**的函数空间，这是其架构优势的数学基础。
+
+#### 深度 vs 宽度的权衡
+
+**经验观察**：在固定参数量下，增加深度通常比增加宽度更有效。
+
+**理论解释**（Merrill & Sabharwal, 2023）：
+- 深度 $L$ 层 Transformer 可以表达 $L$ 步组合推理
+- 宽度增加（增大 $d_{model}$）主要提升每步的表达精度
+- 某些任务（如多步推理）**需要深度**，无法仅通过增加宽度来解决
+
+**实证**：
+
+| 配置 | 参数量 | 任务 A | 任务 B（多步推理） |
+|------|:------:|:------:|:----------------:|
+| 浅而宽（6层, d=2048） | ~125M | 好 | 差 |
+| 深而窄（24层, d=512） | ~125M | 好 | **好** |
+
+这解释了为什么现代 LLM 普遍采用较深的架构（32-80 层），而非极宽的浅层架构。
+
+### 4.6 FFN 作为 Key-Value Memory
+
+Geva et al. (2021) 提出了一个重要的理论视角：**Transformer 的 FFN 层本质上是一个 Key-Value 记忆网络**。
+
+#### 核心观点
+
+标准 FFN 的计算为：
+
+$$\text{FFN}(x) = f(xW_1) W_2$$
+
+将其分解：
+
+$$\text{FFN}(x) = \sum_{i=1}^{d_{ff}} f(x \cdot k_i) \cdot v_i$$
+
+其中：
+- $k_i = W_1[:, i]$：FFN 第一层的第 $i$ 列，类似于"键"（key）
+- $v_i = W_2[i, :]$：FFN 第二层的第 $i$ 行，类似于"值"（value）
+- $f(x \cdot k_i)$：输入 $x$ 与键 $k_i$ 的匹配程度，通过激活函数决定是否"检索"
+
+#### 记忆网络类比
+
+```mermaid
+graph TB
+    subgraph "FFN 作为 Key-Value Memory"
+        X["输入 x"] --> M1["与 d_ff 个键匹配<br/>x · k₁, x · k₂, ..., x · k_{d_ff}"]
+        M1 --> ACT["激活函数 f()<br/>决定哪些键被激活"]
+        ACT --> M2["加权求和对应的值<br/>Σ f(x·kᵢ) · vᵢ"]
+        M2 --> OUT["输出: 检索到的知识"]
+    end
+
+    subgraph "类比: 传统 Key-Value 存储"
+        Q["查询 q"] --> MATCH["在键集合中匹配"]
+        MATCH --> RET["返回对应的值"]
+    end
+```
+
+#### 实验证据
+
+Geva et al. (2021) 通过实验验证了这一视角：
+
+**1. 键的可解释性**
+
+FFN 第一层的每个神经元（键向量 $k_i$）对应一个可解释的**输入模式**：
+
+| 键 $k_i$ 被激活的输入 | 对应的模式 |
+|---------------------|----------|
+| "The capital of France is" | 地理知识 |
+| "she said 'I am", "he told me that" | 引语模式 |
+| "2 + 3 =", "12 times 5 =" | 数学运算 |
+
+**2. 值的可解释性**
+
+对应的值向量 $v_i$ 在词汇空间中表示该键"记住"的信息：
+
+$$\text{Top tokens}(W_U \cdot v_i) = \text{该键存储的知识}$$
+
+例如，地理键对应的值向量在词汇空间中最接近 "Paris", "French" 等词。
+
+**3. 稀疏激活**
+
+在实际推理中，FFN 的大部分神经元是不激活的（$f(x \cdot k_i) \approx 0$），只有少量与当前输入匹配的"键"被激活。这解释了为什么：
+
+- MoE 架构有效：只需激活部分专家（即部分"记忆"）
+- 模型剪枝可行：大量不活跃的键可以被安全移除
+- 知识编辑可能：修改特定键值对可以编辑模型的知识
+
+#### 与 Attention 的统一视角
+
+有趣的是，Attention 和 FFN 都可以被理解为"检索"操作：
+
+| 维度 | Self-Attention | FFN |
+|------|:-------------:|:---:|
+| 检索来源 | 上下文中的其他 token | 模型参数中存储的知识 |
+| 键 | 上下文 token 的 $K$ 投影 | $W_1$ 的列向量 |
+| 值 | 上下文 token 的 $V$ 投影 | $W_2$ 的行向量 |
+| 查询 | 当前 token 的 $Q$ 投影 | 当前 token 的表示 $x$ |
+| 匹配方式 | Softmax 归一化 | 激活函数（ReLU/SwiGLU） |
+
+**统一视角**：Transformer 的一层 = **从上下文检索信息（Attention）** + **从参数化记忆中检索知识（FFN）**。
+
+这一视角对理解 LLM 的知识存储、知识编辑、以及幻觉（hallucination）现象都提供了理论基础。
+
+### 4.7 Sparse Autoencoders (SAE) 的最新进展
+
+Anthropic 在稀疏自编码器方面的研究持续推进，从早期的概念验证发展到了大规模的实际应用。
+
+#### 从 Toy Models 到 Claude 3 Sonnet
+
+**研究时间线**：
+
+```mermaid
+graph LR
+    A["Toy Models<br/>of Superposition<br/>2022.09"] --> B["Towards<br/>Monosemanticity<br/>2023.10"]
+    B --> C["Scaling<br/>Monosemanticity<br/>2024.05"]
+    C --> D["Circuit Tracing<br/>(最新)"]
+```
+
+**阶段 1：Toy Models of Superposition (2022)**
+
+使用极简模型证明了 Superposition 现象的存在，详见 Module 2 advanced.md。
+
+**阶段 2：Towards Monosemanticity (2023)**
+
+在一个小型单层 Transformer（512 维）上训练 SAE：
+- SAE 扩展维度：4096（8倍扩展）
+- 发现了大量可解释的单语义特征（monosemantic features）
+- 验证了 SAE 可以将多语义神经元"拆解"为单语义特征
+
+**阶段 3：Scaling Monosemanticity (2024)**
+
+在 Claude 3 Sonnet 的中间层上训练大规模 SAE：
+- SAE 扩展维度：高达数百万
+- 在生产级模型上发现了丰富的可解释特征
+
+**关键发现**：
+
+| 特征类别 | 示例 | 含义 |
+|---------|------|------|
+| 实体特征 | "Golden Gate Bridge" 特征 | 在提到金门大桥时高度激活 |
+| 概念特征 | "代码错误" 特征 | 在检测代码缺陷时激活 |
+| 行为特征 | "礼貌拒绝" 特征 | 在模型需要拒绝请求时激活 |
+| 安全特征 | "有害内容检测" 特征 | 在输入包含危险内容时激活 |
+| 多语言特征 | "中文语法" 特征 | 在处理中文时激活 |
+
+**实验验证——特征操控**：
+
+Anthropic 通过人为激活或抑制特定 SAE 特征，验证了特征的因果作用：
+
+- **激活 "Golden Gate Bridge" 特征**：模型在回答各种问题时都会提及金门大桥
+- **抑制 "礼貌拒绝" 特征**：模型变得更不倾向于拒绝请求（安全性下降）
+- **激活 "代码" 特征**：模型倾向于用代码来回答非代码问题
+
+这些实验证明 SAE 提取的特征不仅是统计相关性，而且具有**因果控制模型行为**的能力。
+
+#### SAE 的技术挑战与改进方向
+
+**1. 扩展性问题**
+
+SAE 的字典大小需要远大于模型维度才能充分分解 Superposition：
+
+$$n_{features} \gg d_{model}$$
+
+对于 $d_{model} = 4096$ 的模型，可能需要数百万维的 SAE。这带来：
+- 训练成本高（需要大量 activation 数据）
+- 推理成本高（每个 token 都需要通过 SAE 编码）
+
+**2. 死特征问题**
+
+大规模 SAE 中，大量特征可能永远不被激活（"死特征"）。改进方案：
+- 重新初始化不活跃特征
+- 使用 Top-K 激活替代 ReLU + L1（Gao et al., 2024）
+- 分组训练策略
+
+**3. 特征的层次结构**
+
+Anthropic 发现特征之间存在层次关系：
+- 低层特征：词法、语法模式
+- 中层特征：语义概念、实体
+- 高层特征：抽象推理、行为策略
+
+理解这种层次结构对于构建完整的模型可解释性图谱至关重要。
+
 ---
 
 ## 参考资料
@@ -377,8 +600,17 @@ $$y(t) = Ch(t) + Dx(t)$$
 10. Gu & Dao (2023). *Mamba: Linear-Time Sequence Modeling with Selective State Spaces*.
 11. Shazeer (2019). *Fast Transformer Decoding: One Write-Head is All You Need*. (MQA)
 12. Ainslie et al. (2023). *GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints*.
+13. Pérez et al. (2021). *Attention is Turing Complete*. JMLR.
+14. Yun et al. (2020). *Are Transformers Universal Approximators of Sequence-to-Sequence Functions?* ICLR.
+15. Geva et al. (2021). *Transformer Feed-Forward Layers Are Key-Value Memories*. EMNLP.
+16. Bricken et al. (2023). *Towards Monosemanticity: Decomposing Language Models With Dictionary Learning*. Anthropic.
+17. Templeton et al. (2024). *Scaling Monosemanticity: Extracting Interpretable Features from Claude 3 Sonnet*. Anthropic.
+18. Wang et al. (2022). *DeepNet: Scaling Transformers to 1,000 Layers*. Microsoft.
+19. Merrill & Sabharwal (2023). *The Expressive Power of Transformers with Chain of Thought*.
 
 ### 博客
 1. [Transformer Circuits Thread](https://transformer-circuits.pub/) - Anthropic
 2. [In-context Learning and Induction Heads](https://transformer-circuits.pub/2022/in-context-learning-and-induction-heads/index.html) - Anthropic
 3. [A Mathematical Framework for Transformer Circuits](https://transformer-circuits.pub/2021/framework/index.html) - Anthropic
+4. [Scaling Monosemanticity](https://transformer-circuits.pub/2024/scaling-monosemanticity/) - Anthropic
+5. [Transformer Feed-Forward Layers Are Key-Value Memories](https://arxiv.org/abs/2012.14913) - Geva et al.
