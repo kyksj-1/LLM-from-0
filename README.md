@@ -9,7 +9,7 @@
 ## 教程特色
 
 - **数学严谨**：每个算法都配有详细的数学推导，从原理到实现
-- **工业实践**：重点关注Google和DeepSeek的技术路线
+- **工业实践**：Google、DeepSeek、Anthropic 三条技术线贯穿全教程
 - **工程化**：不只是玩具代码，而是真实可运行的工程实现
 - **可视化**：大量Mermaid图表辅助理解
 - **项目驱动**：贯穿全教程的综合项目，从零手搓LLM
@@ -75,6 +75,114 @@ graph TB
     F --> F2[KV Cache与量化]
     F --> F3[推理系统]
     F --> G[综合项目]
+```
+
+---
+
+## 全局知识依赖图
+
+> 下图展示了 17 个模块之间的**知识依赖关系**。实线箭头表示"必须先学"，虚线箭头表示"有帮助但非必需"。
+
+```mermaid
+graph LR
+    subgraph 基础层["🔤 基础组件 (模块 0-3)"]
+        M0["00 序章<br/>LLM全景图"]
+        M1["01 分词<br/>BPE/WordPiece/Unigram"]
+        M2["02 嵌入<br/>RoPE/ALiBi/YaRN"]
+        M3["03 Transformer<br/>Attention/FFN/Norm"]
+    end
+
+    subgraph 架构层["🏗️ 架构演进 (模块 4-6)"]
+        M4["04 Decoder-Only<br/>GPT→Llama→Gemma"]
+        M5["05 注意力变体<br/>MQA/GQA/MLA"]
+        M6["06 MoE<br/>混合专家/路由"]
+    end
+
+    subgraph 预训练层["⚡ 预训练 (模块 7-9)"]
+        M7["07 数据工程<br/>采集/清洗/去重"]
+        M8A["08A 预训练目标<br/>CLM/MLM/FIM"]
+        M8B["08B Scaling Laws<br/>Chinchilla/Kaplan"]
+        M8C["08C 训练工程<br/>混合精度/优化器"]
+        M9["09 分布式训练<br/>3D并行/FSDP"]
+    end
+
+    subgraph 对齐层["🎯 后训练对齐 (模块 10-12)"]
+        M10["10 SFT<br/>LoRA/QLoRA"]
+        M11["11 RLHF<br/>PPO/GRPO"]
+        M12["12 DPO<br/>KTO/SimPO/SPPO"]
+    end
+
+    subgraph 应用层["🚀 推理与应用 (模块 13-16)"]
+        M13["13 推理/CoT<br/>思维链/Test-Time Compute"]
+        M14["14 推理加速<br/>KV Cache/量化/vLLM"]
+        M15["15 RAG<br/>检索增强/GraphRAG"]
+        M16["16 前沿专题<br/>多模态/Agent/安全"]
+    end
+
+    FP["🎓 终极项目<br/>从零训练完整 LLM"]
+
+    %% 基础层内部
+    M0 --> M1
+    M0 --> M2
+    M1 --> M3
+    M2 --> M3
+
+    %% 基础 → 架构
+    M3 --> M4
+    M3 --> M5
+    M4 --> M6
+
+    %% 架构 → 预训练
+    M4 --> M8A
+    M5 -.-> M9
+    M6 -.-> M9
+    M4 --> M7
+
+    %% 预训练内部
+    M7 --> M8A
+    M8A --> M8B
+    M8B --> M8C
+    M8C --> M9
+
+    %% 预训练 → 对齐
+    M9 --> M10
+    M10 --> M11
+    M11 --> M12
+
+    %% 对齐 → 应用
+    M12 --> M13
+    M5 --> M14
+    M10 -.-> M14
+    M13 -.-> M14
+    M14 -.-> M15
+    M15 -.-> M16
+
+    %% 汇聚到终极项目
+    M9 --> FP
+    M12 --> FP
+    M14 -.-> FP
+
+    %% 样式
+    style M0 fill:#e1f5fe
+    style M1 fill:#e1f5fe
+    style M2 fill:#e1f5fe
+    style M3 fill:#e1f5fe
+    style M4 fill:#e8f5e9
+    style M5 fill:#e8f5e9
+    style M6 fill:#e8f5e9
+    style M7 fill:#fff3e0
+    style M8A fill:#fff3e0
+    style M8B fill:#fff3e0
+    style M8C fill:#fff3e0
+    style M9 fill:#fff3e0
+    style M10 fill:#fce4ec
+    style M11 fill:#fce4ec
+    style M12 fill:#fce4ec
+    style M13 fill:#f3e5f5
+    style M14 fill:#f3e5f5
+    style M15 fill:#f3e5f5
+    style M16 fill:#f3e5f5
+    style FP fill:#fff9c4
 ```
 
 ---
