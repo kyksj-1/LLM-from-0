@@ -1,0 +1,76 @@
+# ============================================================
+# Version B: 1B 参数模型配置（4-8 卡 GPU）
+# ============================================================
+#
+# 架构: Llama 风格 Decoder-Only Transformer（更大版本）
+# 特点: 与 300M 版本相同的架构风格，但参数量增大 3 倍+
+#
+# 与 300M 版本的主要区别:
+# - d_model: 1024 → 2048（宽度翻倍）
+# - n_layers: 24 → 32（深度增加）
+# - n_kv_heads: 4 → 8（更多 KV 头以匹配更大的 Q 头数）
+# - vocab_size: 32K → 64K（更大词汇表支持更多语言）
+# - max_seq_len: 2048 → 4096（更长上下文）
+# - 需要分布式训练: FSDP 或 DeepSpeed ZeRO（参考模块 9）
+#
+# 扩展指南见 docs/scaling_guide.md
+# ============================================================
+
+# === 模型架构 ===
+model:
+  vocab_size: 64000           # 更大词汇表（支持中英文 + 代码 + 特殊 token）
+  max_seq_len: 4096           # 更长上下文（需要更多 KV Cache 显存）
+  d_model: 2048               # 隐藏维度翻倍
+  n_layers: 32                # 更深的网络
+  n_heads: 32                 # 更多注意力头（head_dim = 2048/32 = 64，与 300M 相同）
+  n_kv_heads: 8               # GQA: 每 4 个 Q 头共享 1 组 KV（比例与 300M 相同）
+  d_ff: 5462                  # SwiGLU FFN ≈ 8/3 × 2048
+  norm_eps: 1.0e-6
+  rope_base: 10000.0
+  dropout: 0.0
+  tie_weights: false          # 1B 模型不共享权重（参考 Llama 2 7B 的做法）
+
+# === 预训练配置 ===
+training:
+  # --- 优化器 ---
+  learning_rate: 3.0e-4       # 峰值学习率（与 300M 相同，Chinchilla 建议）
+  min_lr_ratio: 0.1
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  max_grad_norm: 1.0
+
+  # --- 训练规模（分布式） ---
+  batch_size: 4               # 每 GPU 的 micro batch（比 300M 小，因为模型更大）
+  gradient_accumulation_steps: 8   # 更大的梯度累积
+  # 假设 4 GPU: 等效 batch = 4 × 8 × 4 = 128 samples
+  # 每步 tokens: 128 × 4096 = 524,288 tokens
+  # 100,000 步 ≈ 52B tokens（接近 Chinchilla 最优 20B for 1B 模型）
+  max_steps: 100000
+  warmup_steps: 4000
+
+  # --- 精度与效率 ---
+  mixed_precision: "bf16"
+  gradient_checkpointing: true
+
+  # --- 日志与检查点 ---
+  log_interval: 10
+  save_interval: 2000         # 更大间隔（每个 checkpoint 更大）
+  eval_interval: 1000
+  output_dir: "./checkpoints/1b"
+
+  # --- SFT ---
+  sft_learning_rate: 1.0e-5   # 比 300M 更小的 SFT 学习率
+  sft_max_steps: 5000
+
+  # --- DPO ---
+  dpo_beta: 0.1
+  dpo_learning_rate: 3.0e-7
+
+# === 分布式配置（Version B 专用） ===
+distributed:
+  strategy: "fsdp"            # 推荐 FSDP（PyTorch 原生，参考模块 9）
+  # 备选: "deepspeed_zero2"
+  n_gpus: 4                   # GPU 数量
+  sharding_strategy: "FULL_SHARD"   # 完全分片（最省显存）
+  # 其他选项: "SHARD_GRAD_OP"（更快但更耗显存）

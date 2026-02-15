@@ -1,0 +1,64 @@
+# ============================================================
+# Version A: 300M 参数模型配置（单卡 24GB GPU）
+# ============================================================
+#
+# 架构: Llama 风格 Decoder-Only Transformer
+# 特点: GQA + SwiGLU + RoPE + RMSNorm + Pre-Norm
+#
+# 设计依据:
+# - 模块 4 (Decoder-Only): 架构选择与参数配置
+# - 模块 5 (注意力变体): GQA 设计（4 KV heads 节省 75% KV Cache）
+# - 模块 8B (Scaling Laws): Chinchilla 最优训练 token 数 ≈ 20 × 参数量
+# - 模块 8C (训练工程): 学习率、batch size、梯度累积的选择
+# ============================================================
+
+# === 模型架构 ===
+model:
+  vocab_size: 32000           # 词汇表大小（BPE 分词器，参考模块 1）
+  max_seq_len: 2048           # 最大序列长度（影响 RoPE 频率和 KV Cache 大小）
+  d_model: 1024               # 隐藏维度（模型宽度，决定表示能力）
+  n_layers: 24                # Transformer Block 层数（模型深度）
+  n_heads: 16                 # Query 注意力头数（head_dim = 1024/16 = 64）
+  n_kv_heads: 4               # KV 注意力头数（GQA: 每 4 个 Q 头共享 1 组 KV）
+  d_ff: 2730                  # SwiGLU FFN 中间维度 ≈ 8/3 × d_model，对齐到 2 的倍数
+  norm_eps: 1.0e-6            # RMSNorm epsilon
+  rope_base: 10000.0          # RoPE 基底频率（标准值）
+  dropout: 0.0                # 预训练不使用 Dropout（参考 Llama 2）
+  tie_weights: true           # 共享 Embedding 和 LM Head 权重（节省参数）
+
+# === 预训练配置 ===
+training:
+  # --- 优化器: AdamW ---
+  learning_rate: 3.0e-4       # 峰值学习率（300M 模型的典型值）
+  min_lr_ratio: 0.1           # 最终学习率 = peak_lr × 0.1
+  weight_decay: 0.1           # 权重衰减（排除 norm 和 bias）
+  beta1: 0.9                  # Adam β1
+  beta2: 0.95                 # Adam β2（比默认 0.999 小，更稳定）
+  max_grad_norm: 1.0          # 梯度裁剪阈值
+
+  # --- 训练规模 ---
+  batch_size: 8               # 每 GPU 的 micro batch size
+  gradient_accumulation_steps: 4   # 梯度累积（等效 batch = 8 × 4 = 32 samples）
+  # 每步处理 tokens: 32 × 2048 = 65,536 tokens
+  # 50,000 步总 tokens: 50000 × 65536 ≈ 3.3B tokens
+  # Chinchilla 最优: 20 × 300M = 6B tokens，可根据资源调整 max_steps
+  max_steps: 50000            # 最大训练步数
+  warmup_steps: 2000          # 线性预热步数（约占总步数的 4%）
+
+  # --- 精度与效率 ---
+  mixed_precision: "bf16"     # BF16 混合精度（需 Ampere+ GPU）
+  gradient_checkpointing: true  # 梯度检查点（用时间换显存，约省 60% 激活显存）
+
+  # --- 日志与检查点 ---
+  log_interval: 10            # 每 10 步打印日志
+  save_interval: 1000         # 每 1000 步保存 checkpoint
+  eval_interval: 500          # 每 500 步评估
+  output_dir: "./checkpoints/300m"
+
+  # --- SFT 阶段 ---
+  sft_learning_rate: 2.0e-5   # SFT 学习率（比预训练小一个数量级）
+  sft_max_steps: 3000         # SFT 步数（通常较短）
+
+  # --- DPO 阶段 ---
+  dpo_beta: 0.1               # DPO β（控制偏离参考模型的程度，参考模块 12）
+  dpo_learning_rate: 5.0e-7   # DPO 学习率（非常小，避免遗忘）
