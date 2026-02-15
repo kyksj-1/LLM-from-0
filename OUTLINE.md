@@ -2246,6 +2246,18 @@ code/
 
 **总计**: 26 个文件，约 10,638 行新增内容。
 
+##### 批次 2: 训练类模块（7, 8A, 8B, 8C, 9）✅ 已完成
+
+| 模块 | 文件夹 | 文件数 | Commit | 说明 |
+|------|--------|--------|--------|------|
+| 模块 7: 数据工程 | `07_data_engineering/` + `code/data_engineering/` | 8 | `c893452` | README.md + advanced.md + 6个代码文件（去重/过滤/清洗/混合/管线/分析） |
+| 模块 8A: 预训练目标 | `08a_pretraining_objectives/` + `code/pretraining_objectives/` | 7 | `ba089d8` | README.md + advanced.md + 5个代码文件（NTP/MLM/FIM损失、困惑度、工具） |
+| 模块 8B: Scaling Laws | `08b_scaling_laws/` + `code/scaling_laws/` | 8 | `0812092` | README.md + advanced.md + 6个代码文件（拟合器/Chinchilla/FLOPs/可视化/工具） |
+| 模块 8C: 训练工程 | `08c_training_engineering/` + `code/training_engineering/` | 10 | `96061e7` | README.md + advanced.md + 8个代码文件（优化器/调度器/检查点/训练器/监控/诊断/工具） |
+| 模块 9: 分布式训练 | `09_distributed/` + `code/distributed/` | 10 | `405dc3d` | README.md + advanced.md + 8个代码文件（DP/TP/PP/ZeRO/混合精度/梯度累积/激活检查点/工具） |
+
+**总计**: 43 个文件，约 22,420 行新增内容。
+
 #### 执行方式
 
 **1. 使用子代理（Sub-agents）直接写入主仓库**
@@ -2274,9 +2286,9 @@ code/
 | 批次   | 模块               | 子代理分配    | 状态 | 理由                       |
 | ---- | ---------------- | -------- | ---- | ------------------------ |
 | 批次 1 | 4, 5, 6          | 各 1 个子代理 | ✅ 已完成 | 架构类模块，相互独立               |
-| 批次 2 | 7, 8A, 8B, 8C, 9 | 各 1 个子代理 | ⬅️ 下一批 | 训练类模块，相互独立（8A/8B/8C 需串行） |
-| 批次 3 | 10, 11, 12       | 各 1 个子代理 | ⏳ 待执行 | 对齐类模块，相互独立               |
-| 批次 4 | 13, 14, 15, 16   | 各 1 个子代理 | ⏳ 待执行 | 应用/前沿类模块                 |
+| 批次 2 | 7, 8A, 8B, 8C, 9 | 各 1 个子代理 | ✅ 已完成 | 训练类模块，5个子代理并行写入          |
+| 批次 3 | 10, 11, 12       | 各 1 个子代理 | ⬅️ 下一批 | 对齐类模块（SFT/RLHF/评估），相互独立 |
+| 批次 4 | 13, 14, 15, 16   | 各 1 个子代理 | ⏳ 待执行 | 应用/前沿类模块（推理/RAG/Agent/前沿） |
 
 每批次内的子代理并行启动，批次间串行执行（等前一批完成并 commit 后再启动下一批）。
 
@@ -2354,6 +2366,11 @@ code/{module}/
 - `05_attention_variants/README.md` — Phase 2 README 范例（含 KV Cache 分析）
 - `06_moe/README.md` — Phase 2 README 范例（含 MoE 路由数学推导）
 - `code/decoder_only/model.py` — Phase 2 代码范例（完整 Decoder-Only 模型）
+- `07_data_engineering/README.md` — Batch 2 范例（数据工程，MinHash/LSH去重）
+- `08b_scaling_laws/README.md` — Batch 2 范例（Scaling Laws，完整Lagrange推导）
+- `09_distributed/README.md` — Batch 2 范例（分布式训练，ZeRO推导 + 3D并行）
+- `code/scaling_laws/scaling_laws.py` — Batch 2 代码范例（含Bootstrap置信区间）
+- `code/training_engineering/optimizer.py` — Batch 2 代码范例（AdamW从零实现）
 
 ### 第三阶段: 终极项目
 
@@ -2363,5 +2380,13 @@ code/{module}/
 - 整合测试与文档
 
 ---
+
+**阶段进度总览**:
+- Phase 1（模块 0-3 更新）: ✅ 已完成
+- Phase 2 批次 1（模块 4, 5, 6）: ✅ 已完成 — 26 文件
+- Phase 2 批次 2（模块 7, 8A, 8B, 8C, 9）: ✅ 已完成 — 43 文件
+- Phase 2 批次 3（模块 10, 11, 12）: ⬅️ 下一批
+- Phase 2 批次 4（模块 13, 14, 15, 16）: ⏳ 待执行
+- Phase 3（终极项目）: ⏳ 待执行
 
 *最后更新: 2026-02-15*
