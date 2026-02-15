@@ -2234,85 +2234,64 @@ code/
 
 > **重要**: 本阶段开启新会话执行。以下是给新会话的完整上下文。
 
+#### 已完成批次
+
+##### 批次 1: 架构类模块（4, 5, 6）✅ 已完成
+
+| 模块 | 文件夹 | 文件数 | Commit | 说明 |
+|------|--------|--------|--------|------|
+| 模块 4: Decoder-Only 架构 | `04_decoder_only/` + `code/decoder_only/` | 9 | `7d4591a` | README.md(1153行) + advanced.md + 7个代码文件 |
+| 模块 5: 注意力机制变体 | `05_attention_variants/` + `code/attention_variants/` | 9 | `20d52c7` | README.md(807行) + advanced.md + 7个代码文件 |
+| 模块 6: MoE 混合专家 | `06_moe/` + `code/moe/` | 8 | `bbb7932` | README.md(1101行) + advanced.md + 6个代码文件 |
+
+**总计**: 26 个文件，约 10,638 行新增内容。
+
 #### 执行方式
 
-**1. 使用子代理（Sub-agents）+ Git Worktree 并行编写**
+**1. 使用子代理（Sub-agents）直接写入主仓库**
 
-每个模块的工作量大（README.md ~400行 + advanced.md ~300行 + 代码文件），适合用 Task 工具的子代理并行处理。**使用 Git Worktree 实现真正的并行隔离**。
+每个模块的工作量大（README.md ~400-1100行 + advanced.md ~300行 + 代码文件），使用 Task 工具的子代理并行处理。
 
-##### 1.1 Git Worktree 工作流
+> ⚠️ **注意**: 最初设计使用 Git Worktree 实现并行隔离，但在 Windows 环境下失败。
+> 实际采用的方案是：所有子代理直接写入主仓库 `D:\Repos\LLM learning\`，
+> 因为每个模块有独立的子文件夹（`04_decoder_only/`、`05_attention_variants/` 等），
+> 不会产生文件冲突。**子代理不执行任何 Git 操作**，所有 `git add` / `git commit`
+> 由主 Agent（Orchestrator）在子代理完成后统一执行。
 
-由于所有子代理共享同一个文件系统，同一个 Git 仓库同一时刻只能 checkout 一个分支。为了让多个子代理各自独立地 `git add` / `git commit`，采用 `git worktree` 方案：
+##### 1.1 实际工作流
 
-```bash
-# 主 Agent（Orchestrator）在主仓库目录执行：
-# 为每个模块创建独立的 worktree 目录 + 分支
-git worktree add ../LLM-m04 -b feat/module-04
-git worktree add ../LLM-m05 -b feat/module-05
-git worktree add ../LLM-m06 -b feat/module-06
-# ...依次创建到 module-16
-
-# 验证
-git worktree list
 ```
-
-**目录结构示意：**
-```
-D:\Repos\LLM learning\      ← 主 worktree（feat/basic-components 分支）
-D:\Repos\LLM-m04\           ← Agent-4 的独立工作目录（feat/module-04 分支）
-D:\Repos\LLM-m05\           ← Agent-5 的独立工作目录（feat/module-05 分支）
-...
-D:\Repos\LLM-m16\           ← Agent-16 的独立工作目录（feat/module-16 分支）
-```
-
-**每个子代理在自己的 worktree 目录中：**
-- 拥有完整的仓库文件副本
-- 在自己的分支上独立工作
-- 自由执行 `git add` / `git commit`，不会与其他代理冲突
-- 遵循 `Git Workflow.md` 中的所有规范
-
-**全部完成后，主 Agent 执行合并与清理：**
-```bash
-# 回到主 worktree
-cd "D:\Repos\LLM learning"
-
-# 逐个合并各模块分支
-git merge feat/module-04
-git merge feat/module-05
-# ...
-
-# 清理 worktree
-git worktree remove ../LLM-m04
-git worktree remove ../LLM-m05
-# ...
+1. 主 Agent 启动一批子代理（Task 工具，background 模式）
+2. 每个子代理在自己的模块文件夹中创建文件（Write 工具）
+3. 主 Agent 监控子代理进度，等待全部完成
+4. 主 Agent 验证产出文件（Glob 工具）
+5. 主 Agent 逐模块执行 git add + git commit
+6. 启动下一批次
 ```
 
 ##### 1.2 子代理分组与调度
 
-| 批次 | 模块 | 子代理分配 | 理由 |
-|------|------|-----------|------|
-| 批次 1 | 4, 5, 6 | 各 1 个子代理 | 架构类模块，相互独立 |
-| 批次 2 | 7, 8A, 8B, 8C, 9 | 各 1 个子代理 | 训练类模块，相互独立（8A/8B/8C 可并行） |
-| 批次 3 | 10, 11, 12 | 各 1 个子代理 | 对齐类模块，相互独立 |
-| 批次 4 | 13, 14, 15, 16 | 各 1 个子代理 | 应用/前沿类模块 |
+| 批次   | 模块               | 子代理分配    | 状态 | 理由                       |
+| ---- | ---------------- | -------- | ---- | ------------------------ |
+| 批次 1 | 4, 5, 6          | 各 1 个子代理 | ✅ 已完成 | 架构类模块，相互独立               |
+| 批次 2 | 7, 8A, 8B, 8C, 9 | 各 1 个子代理 | ⬅️ 下一批 | 训练类模块，相互独立（8A/8B/8C 需串行） |
+| 批次 3 | 10, 11, 12       | 各 1 个子代理 | ⏳ 待执行 | 对齐类模块，相互独立               |
+| 批次 4 | 13, 14, 15, 16   | 各 1 个子代理 | ⏳ 待执行 | 应用/前沿类模块                 |
 
-每批次内的子代理并行启动，批次间可串行也可并行（模块间内容独立性较高）。
+每批次内的子代理并行启动，批次间串行执行（等前一批完成并 commit 后再启动下一批）。
 
 ##### 1.3 子代理调度 prompt 模板
 
 ```
 你是 LLM 教程撰写者（Agent-{N}）。
 
-【工作目录】D:\Repos\LLM-m{XX}\（你的专属 worktree）
-【工作分支】feat/module-{XX}（已由主 Agent 创建）
+【工作目录】D:\Repos\LLM learning\（主仓库，直接写入）
+【重要】不要执行任何 Git 操作（git add/commit/push 等），主 Agent 会统一处理。
 
-请根据 OUTLINE.md 中模块 {X} 的大纲，在你的工作目录中创建以下文件:
+请根据 OUTLINE.md 中模块 {X} 的大纲，创建以下文件:
 1. {XX_module}/README.md — 核心教程（理论+数学推导+Mermaid图+三条技术线+项目实践）
 2. {XX_module}/advanced.md — 进阶工业实践
 3. code/{module}/*.py — 代码实现文件
-
-完成后在你的分支上 git commit，格式遵循 Git Workflow.md。
-不要执行 git merge 或 git push。
 
 【关键约束】见下方"写作规范"。
 ```
@@ -2367,10 +2346,14 @@ code/{module}/
 **6. 已完成模块可作为参考范例**
 
 新会话可以读取以下已完成文件作为风格参考：
-- `03_transformer/README.md` — README 范例（最完整的一个）
+- `03_transformer/README.md` — README 范例（Phase 1，最完整的一个）
 - `03_transformer/advanced.md` — advanced.md 范例
 - `code/transformer/attention.py` — 代码文件范例
 - `02_embedding/advanced.md` — 另一个 advanced.md 范例
+- `04_decoder_only/README.md` — Phase 2 README 范例（1153行，最新风格）
+- `05_attention_variants/README.md` — Phase 2 README 范例（含 KV Cache 分析）
+- `06_moe/README.md` — Phase 2 README 范例（含 MoE 路由数学推导）
+- `code/decoder_only/model.py` — Phase 2 代码范例（完整 Decoder-Only 模型）
 
 ### 第三阶段: 终极项目
 
