@@ -2,7 +2,36 @@
 
 > 注意力机制是 Transformer 的核心引擎。本章深入分析注意力机制的工业级变体，从标准 Multi-Head Attention 到 DeepSeek 的 Multi-head Latent Attention，探索如何在模型质量与推理效率之间取得最优平衡。
 
-**前置知识**：本章假设你已掌握模块3的 Self-Attention 和 Multi-Head Attention 基础。如需回顾，请参考 [模块3: Transformer核心架构](../03_transformer/README.md)。
+## 章节定位
+
+```mermaid
+graph LR
+    M3["模块 3<br/>Transformer 核心架构<br/>(Self-Attention, MHA)"]
+    M4["模块 4<br/>Decoder-Only 架构<br/>(GPT/Llama/Gemma)"]
+    M5["<strong>模块 5</strong><br/>注意力机制进阶<br/>(MQA/GQA/MLA)"]
+    M6["模块 6<br/>MoE 混合专家<br/>(稀疏激活)"]
+    M14["模块 14<br/>推理加速<br/>(KV Cache/量化)"]
+
+    M3 -->|"注意力基础"| M5
+    M4 -->|"自回归推理瓶颈"| M5
+    M5 -->|"注意力优化 → 专家路由"| M6
+    M5 -->|"KV Cache 压缩 → 推理优化"| M14
+
+    style M5 fill:#fce4ec,stroke:#c62828,stroke-width:3px
+    style M3 fill:#e3f2fd,stroke:#1565c0
+    style M4 fill:#e3f2fd,stroke:#1565c0
+    style M6 fill:#e8f5e9,stroke:#2e7d32
+    style M14 fill:#e8f5e9,stroke:#2e7d32
+```
+
+**核心动机**：模块 4 介绍了 Decoder-Only 架构的自回归推理过程，但在推理阶段，**KV Cache 的显存占用**迅速成为系统瓶颈。以 Llama 2-70B 为例，仅 KV Cache 就占用超过 10 GB 显存，严重限制了可服务的 batch size 和上下文长度。本模块系统讲解工业界如何通过 MQA、GQA、MLA 三种技术方案压缩 KV Cache，在模型质量与推理效率之间取得最优平衡。
+
+**前置知识**：
+- 模块 3 的 Self-Attention 和 Multi-Head Attention 数学形式
+- 模块 4 的自回归推理过程（Prefill/Decode 两阶段）
+- 基本的线性代数知识（矩阵乘法、低秩近似）
+
+如需回顾，请参考 [模块3: Transformer核心架构](../03_transformer/README.md) 和 [模块4: Decoder-Only架构](../04_decoder_only/README.md)。
 
 ---
 
@@ -14,9 +43,10 @@
 - [4. Grouped-Query Attention（GQA）](#4-grouped-query-attentiongqa)
 - [5. Multi-head Latent Attention（MLA）](#5-multi-head-latent-attentionmla)
 - [6. 统一视角：四种注意力的对比与演进](#6-统一视角四种注意力的对比与演进)
-- [7. Sequence Packing：高效训练数据策略](#7-sequence-packing高效训练数据策略)
-- [8. 三条技术线的注意力实践](#8-三条技术线的注意力实践)
-- [9. 项目实践](#9-项目实践)
+- [7. Flash Attention 工程实践](#7-flash-attention-工程实践)
+- [8. Sequence Packing：高效训练数据策略](#8-sequence-packing高效训练数据策略)
+- [9. 三条技术线的注意力实践](#9-三条技术线的注意力实践)
+- [10. 项目实践](#10-项目实践)
 
 ---
 
@@ -424,7 +454,108 @@ MLA 的低秩压缩与 LoRA（Low-Rank Adaptation）有着深刻的思想联系�
 
 MLA 的缓存大小介于 MQA 和 GQA 之间，但由于每个头仍有独立的解压缩矩阵，模型表达能力远优于 MQA。
 
-### 5.7 训练时的矩阵吸收技巧
+### 5.7 MLA 与 GQA/MQA 的定量对比
+
+为了更直观地理解 MLA 的优势，我们以 DeepSeek-V2（236B 参数）的配置为基准，计算四种方案在不同序列长度下的 KV Cache 总显存占用。
+
+**模型配置**：$n_{layers} = 60$, $n_h = 128$, $d_h = 128$, $d_c = 512$, $d_r = 64$, FP16 精度（2 字节/元素）。
+
+| 方案 | 每层每 token 缓存元素数 | 4K 序列 KV Cache | 32K 序列 KV Cache | 128K 序列 KV Cache |
+|------|----------------------|-----------------|-------------------|-------------------|
+| MHA | $2 \times 128 \times 128 = 32{,}768$ | **15.0 GB** | **120.0 GB** | **480.0 GB** |
+| GQA-8 | $2 \times 8 \times 128 = 2{,}048$ | 0.94 GB | 7.5 GB | 30.0 GB |
+| MQA | $2 \times 128 = 256$ | 0.12 GB | 0.94 GB | 3.75 GB |
+| MLA | $512 + 64 = 576$ | 0.26 GB | 2.11 GB | 8.44 GB |
+
+> 计算公式：$M = n_{layers} \times \text{缓存元素数} \times S \times 2 \text{ bytes}$
+
+**关键观察**：
+
+1. **MLA 相比 MHA 的压缩比约为 57 倍**：这意味着在 128K 上下文长度下，MHA 需要 480 GB 而 MLA 仅需 8.44 GB
+2. **MLA vs GQA-8**：MLA 的缓存大小约为 GQA-8 的 28%，但 MLA 保留了全部 128 个独立注意力头的表达能力
+3. **MLA vs MQA**：MLA 的缓存略大于 MQA（576 vs 256），但模型质量显著优于 MQA——这是因为 MLA 的每个头都有独立的解压缩矩阵
+4. **长上下文场景下 MLA 优势放大**：随着序列长度增长，KV Cache 压缩的价值呈线性增长
+
+**为什么 MLA 比 GQA 更"激进"？**
+
+GQA 和 MLA 的核心区别在于压缩发生的位置：
+
+```mermaid
+graph TB
+    subgraph "GQA: 在头维度压缩"
+        GX["输入 x"] --> GK1["K_g1 (共享给 Q1..Q16)"]
+        GX --> GK2["K_g2 (共享给 Q17..Q32)"]
+        GX --> GKn["... (G=8 组)"]
+        GK1 --> GCache["KV Cache: 2 x G x d_h 元素"]
+    end
+
+    subgraph "MLA: 在表示维度压缩"
+        MX["输入 x"] --> MC["c_KV = W_DKV * x<br/>(d_c 维)"]
+        MC --> MCache["KV Cache: d_c + d_r 元素"]
+        MCache --> MK1["K_1 = W_UK_1 * c_KV"]
+        MCache --> MK2["K_2 = W_UK_2 * c_KV"]
+        MCache --> MKn["... (128 个独立头)"]
+    end
+
+    style GCache fill:#fff3e0,stroke:#e65100
+    style MCache fill:#fce4ec,stroke:#c62828
+```
+
+- **GQA** 强制 $H/G$ 个 Query 头共享**完全相同**的 K 和 V，不同组的 K/V 之间完全独立。信息损失来自组内头的多样性被抹平。
+- **MLA** 将所有头的 KV 信息联合压缩到一个低维空间，然后通过不同的解压缩矩阵恢复每个头的 K/V。信息损失来自低秩近似的重建误差，但由于 $d_c$ 可以调节，这个损失是可控的。
+
+直觉上，MLA 类似于"有损压缩→无损解压"的 codec，而 GQA 类似于"直接降采样"。前者的信息保持效率更高。
+
+### 5.8 MLA 的工程实现考量
+
+MLA 在理论上非常优雅，但工程实现中需要注意以下几个关键问题：
+
+**训练阶段的额外开销**：
+
+| 开销类型 | MHA | MLA | 影响 |
+|----------|-----|-----|------|
+| 投影参数量 | $4d^2$ | $\approx 4d^2 + 2d \cdot d_c + 2n_h d_h \cdot d_c$ | MLA 参数略多（压缩+解压缩矩阵）|
+| 前向计算量 | 基准 | 约 1.1x-1.2x 基准 | 额外的压缩/解压缩投影 |
+| 激活值显存 | $O(n_h \times d_h \times S)$ | $O(d_c \times S)$（Q 也压缩时）| MLA 更省 |
+
+**推理阶段的 KV Cache 重建开销**：
+
+推理时，每次生成新 token 需要计算注意力。对于缓存中的 $c_{KV}$，有两种实现策略：
+
+1. **在线解压缩**：每次注意力计算时，从 $c_{KV}$ 重建 K 和 V。计算量为 $O(S \times d_c \times d_h)$ per head，开销较大。
+2. **矩阵吸收**（DeepSeek 实际采用）：将解压缩矩阵吸收到注意力计算中，直接在压缩空间操作。注意力分数 $c_Q^T W_{QK}^{(h)} c_{KV}$ 避免了显式重建 K，大幅降低推理开销。
+
+```mermaid
+graph LR
+    subgraph "方案A: 在线解压缩 (不推荐)"
+        A1["c_KV"] --> A2["重建 K = W_UK * c_KV"]
+        A2 --> A3["Q * K^T"]
+        A3 --> A4["Softmax"]
+        A1 --> A5["重建 V = W_UV * c_KV"]
+        A4 --> A6["Attn * V"]
+    end
+
+    subgraph "方案B: 矩阵吸收 (DeepSeek 实际方案)"
+        B1["c_KV"] --> B3["c_Q^T * W_QK * c_KV"]
+        B3 --> B4["Softmax"]
+        B4 --> B5["Attn * (W_UV * c_KV)<br/>= W_UV * (Attn * c_KV)"]
+    end
+
+    style B3 fill:#e8f5e9,stroke:#2e7d32
+    style B5 fill:#e8f5e9,stroke:#2e7d32
+```
+
+**为什么 MLA 在大模型上更有优势？**
+
+MLA 的压缩收益与模型规模的关系可以用以下公式理解：
+
+$$\text{压缩比} = \frac{2 n_h d_h}{d_c + d_r}$$
+
+- 当 $n_h$ 增大（更多头）时，MHA 的 KV Cache 线性增长，但 MLA 的 $d_c$ 增长速度远慢于 $n_h d_h$
+- 例如：DeepSeek-V2（$n_h = 128$）的压缩比为 57 倍；如果是一个 $n_h = 32$ 的小模型，$d_c$ 可能需要设置为 256+，压缩比降到约 20 倍
+- **结论**：MLA 的"性价比"随模型规模增大而提高，这与 DeepSeek 将 MLA 定位于大模型场景的策略一致
+
+### 5.9 训练时的矩阵吸收技巧
 
 在实际训练中，MLA 有一个重要的优化：解压缩矩阵可以与投影矩阵合并，避免显式地恢复完整的 K/V。
 
@@ -503,9 +634,103 @@ graph TD
 
 ---
 
-## 7. Sequence Packing：高效训练数据策略
+## 7. Flash Attention 工程实践
 
-### 7.1 Padding 的浪费
+前面 6 节讨论的是"KV Cache 怎么压缩"，而 Flash Attention 解决的是另一个正交问题："注意力计算本身怎么加速"。两者可以组合使用（例如 GQA + FlashAttention 是当前最常见的工业配置）。
+
+### 7.1 标准注意力的 IO 瓶颈
+
+标准注意力的计算过程需要频繁在 GPU 的高带宽内存（HBM）和片上缓存（SRAM）之间搬运数据：
+
+```mermaid
+graph TD
+    subgraph "标准注意力: 三次 HBM 读写"
+        Q["Q, K, V<br/>(从 HBM 读取)"] --> S["S = QK^T<br/>(N x N 矩阵)"]
+        S --> HBM1["写入 HBM<br/>(N^2 元素)"]
+        HBM1 --> P["P = softmax(S)<br/>(N x N 矩阵)"]
+        P --> HBM2["写入 HBM<br/>(N^2 元素)"]
+        HBM2 --> O["O = PV"]
+        O --> HBM3["写入 HBM"]
+    end
+
+    subgraph "Flash Attention: 仅一次 HBM 写"
+        FQ["Q, K, V<br/>(分块从 HBM 读取)"] --> FS["SRAM 内分块计算<br/>在线 Softmax 累积"]
+        FS --> FO["O<br/>(直接写入 HBM)"]
+    end
+
+    style HBM1 fill:#ffcdd2,stroke:#c62828
+    style HBM2 fill:#ffcdd2,stroke:#c62828
+    style FO fill:#c8e6c9,stroke:#2e7d32
+```
+
+**关键数据**（A100 GPU）：
+- HBM 带宽：~2 TB/s，容量 ~80 GB
+- SRAM 带宽：~19 TB/s，容量 ~20 MB
+- SRAM 带宽是 HBM 的约 **10 倍**，但容量只有 1/4000
+
+标准注意力的 HBM 访问量为 $\Theta(Nd + N^2)$，其中 $N^2$ 项来自中间注意力矩阵的读写。当序列长度 $N$ 较大时，这个 $N^2$ 项成为严重的 IO 瓶颈。
+
+### 7.2 Flash Attention 的核心思想：Tiling + 在线 Softmax
+
+Flash Attention (Dao et al., 2022) 的核心思想是**将 Q, K, V 分块（tiling）**，在 SRAM 中完成局部注意力计算，通过**在线 Softmax** 技巧逐块累积全局结果，从而避免将完整的 $N \times N$ 注意力矩阵写入 HBM。
+
+**关键数学技巧——在线 Softmax**：
+
+标准 Softmax 需要先遍历所有元素找最大值，再遍历一次计算指数和归一化。Flash Attention 的在线 Softmax 维护运行统计量 $(m, \ell, O)$，允许分块更新：
+
+$$m^{(j)} = \max(m^{(j-1)}, \max(\text{block}_j))$$
+$$\ell^{(j)} = e^{m^{(j-1)} - m^{(j)}} \cdot \ell^{(j-1)} + \text{rowsum}(e^{\text{block}_j - m^{(j)}})$$
+$$O^{(j)} = \text{diag}(e^{m^{(j-1)} - m^{(j)}}) \cdot O^{(j-1)} + e^{\text{block}_j - m^{(j)}} \cdot V_j$$
+
+最终结果 $O = \text{diag}(\ell)^{-1} O^{(J)}$ **精确等于**标准注意力——这不是近似算法。
+
+### 7.3 Flash Attention v1 → v2 → v3 的演进
+
+| 版本 | 发布年份 | 核心改进 | 实测加速比（vs 标准注意力）| 目标硬件 |
+|------|---------|----------|----------------------|---------|
+| v1 | 2022 | Tiling + 在线 Softmax | 1.5x-3x | A100 |
+| v2 | 2023 | 优化 warp 工作分配 + 减少同步 | 2x-4x（vs v1 再快约 2x）| A100 |
+| v3 | 2024 | TMA + warp-specialization + FP8 | 接近 H100 理论峰值 | H100 (Hopper) |
+
+**Flash Attention-2 的关键优化**：
+- 将 Q 的循环放在外层（而非 K/V），减少 HBM 的重复读取
+- 优化 warp 级别的工作分配，减少 GPU warp 之间的同步开销
+- 原生支持 GQA/MQA——在分块时考虑 KV 头的共享关系
+
+**Flash Attention-3 的关键优化**：
+- 利用 H100 的 TMA（Tensor Memory Accelerator）硬件，异步地将数据从 HBM 搬运到 SRAM
+- Warp-specialization：不同 warp 分别负责数据搬运和计算，实现流水线并行
+- 支持 FP8 注意力计算，进一步提升吞吐量
+
+### 7.4 性能数据与实践指导
+
+**不同序列长度下的实测加速比**（A100, FP16, 头数=32, d_head=128）：
+
+| 序列长度 | 标准注意力 (ms) | FlashAttention-2 (ms) | 加速比 |
+|---------|----------------|----------------------|--------|
+| 512 | 0.8 | 0.5 | 1.6x |
+| 2048 | 8.2 | 3.1 | 2.6x |
+| 4096 | 31.5 | 9.8 | 3.2x |
+| 8192 | 125 | 35 | 3.6x |
+| 16384 | 498 | 128 | 3.9x |
+
+**关键观察**：序列越长，加速比越大。这是因为标准注意力的 $O(N^2)$ HBM 访问在长序列下成为更严重的瓶颈。
+
+**与 PyTorch 原生 `scaled_dot_product_attention` 的关系**：
+- PyTorch 2.0+ 的 `F.scaled_dot_product_attention` 在底层会自动选择 FlashAttention 后端（如果可用）
+- 使用时无需显式调用 FlashAttention 库，但需确保输入满足条件（连续内存、支持的 dtype 等）
+- 自定义掩码（非因果掩码）的支持有限——FlashAttention 主要优化了因果掩码和无掩码场景
+
+**局限性**：
+- 因果掩码以外的自定义掩码支持有限（如 Sequence Packing 的 Block-Diagonal 掩码需要特殊处理）
+- 需要特定的硬件支持（Ampere 及以上架构）
+- 注意力权重不可直接导出用于可视化（中间矩阵不存储到 HBM）
+
+---
+
+## 8. Sequence Packing：高效训练数据策略
+
+### 8.1 Padding 的浪费
 
 在标准训练中，同一个 batch 的所有序列需要 padding 到相同长度：
 
@@ -517,7 +742,7 @@ graph TD
 
 这里有 10/24 = 41.7% 的计算浪费在了 PAD token 上。在实际训练中，这个比例可能更高（尤其当序列长度分布不均匀时）。
 
-### 7.2 Sequence Packing 的思想
+### 8.2 Sequence Packing 的思想
 
 将多个短序列拼接（pack）到一个固定长度的序列中，消除 padding：
 
@@ -526,7 +751,7 @@ Pack 1: [seq1_t1 seq1_t2 ... seq1_t5 | seq2_t1 seq2_t2 | PAD]  浪费仅 1
 Pack 2: [seq3_t1 seq3_t2 ... seq3_t7 | PAD]                      浪费仅 1
 ```
 
-### 7.3 注意力掩码处理：Block-Diagonal Masking
+### 8.3 注意力掩码处理：Block-Diagonal Masking
 
 Packing 引入一个关键问题：**不同序列之间不应该互相注意**。
 
@@ -554,7 +779,7 @@ $$\text{Mask}_{ij} = M_{ij} \cdot \mathbf{1}[j \leq i]$$
     t8 [  0  0  0 |  0  0 |  1  1  1 ]
 ```
 
-### 7.4 Bin Packing 算法
+### 8.4 Bin Packing 算法
 
 将不同长度的序列分配到固定大小的"bin"中，是经典的 bin packing 问题（NP-hard）。常用近似算法：
 
@@ -563,7 +788,7 @@ $$\text{Mask}_{ij} = M_{ij} \cdot \mathbf{1}[j \leq i]$$
 2. 对每个序列，找到第一个能放下的 bin
 3. 如果没有，开启新 bin
 
-### 7.5 对训练收敛的影响
+### 8.5 对训练收敛的影响
 
 Sequence Packing 不仅节省计算，还可能影响训练动态：
 
@@ -575,9 +800,9 @@ Sequence Packing 不仅节省计算，还可能影响训练动态：
 
 ---
 
-## 8. 三条技术线的注意力实践
+## 9. 三条技术线的注意力实践
 
-### 8.1 Google
+### 9.1 Google
 
 Google 在注意力机制上的演进清晰地反映了工程权衡的迭代：
 
@@ -587,9 +812,9 @@ Google 在注意力机制上的演进清晰地反映了工程权衡的迭代：
 | 2022 | PaLM (540B) | MQA | 极大规模推理效率 |
 | 2023-2024 | Gemma 2 | GQA | MQA 质量损失的折中 |
 
-Google 还研发了 **FlashAttention**（Tri Dao 在 Stanford 的工作，被 Google 广泛采用），这是一个不改变注意力数学但极大优化内存访问的技术（详见 [进阶文档](./advanced.md)）。
+Google 还研发了 **FlashAttention**（Tri Dao 在 Stanford 的工作，被 Google 广泛采用），这是一个不改变注意力数学但极大优化内存访问的技术（详见第 7 节和 [进阶文档](./advanced.md)）。
 
-### 8.2 DeepSeek
+### 9.2 DeepSeek
 
 DeepSeek 在注意力机制上走出了独特的技术路线：
 
@@ -601,7 +826,7 @@ DeepSeek 在注意力机制上走出了独特的技术路线：
 
 MLA 是 DeepSeek 最具标志性的架构创新，使得 DeepSeek-V2 的推理成本仅为同等规模 MHA 模型的一小部分。
 
-### 8.3 Anthropic
+### 9.3 Anthropic
 
 Anthropic 在注意力机制方面的公开信息主要集中在**理解和分析**层面，而非架构创新：
 
@@ -613,7 +838,7 @@ Anthropic 在注意力机制方面的公开信息主要集中在**理解和分�
 
 ---
 
-## 9. 项目实践
+## 10. 项目实践
 
 ### 项目1：实现并对比 MHA/MQA/GQA（难度：进阶）
 
@@ -759,6 +984,70 @@ def measure_kv_cache_memory(attn_type, config, seq_len, batch_size):
 
 ---
 
+### 项目5：KV Cache 压缩方案对比实验（难度：进阶）
+
+**目标**：在一个小型 Transformer 上实现 MHA、MQA、GQA、MLA 四种注意力机制，对比 KV Cache 大小和生成质量。
+
+**实验设计**：
+
+核心原则是**控制变量**——固定模型总参数量（或尽量接近），只改变注意力头的 KV 配置：
+
+```
+模型基线配置:
+  d_model = 512, n_layers = 6, n_heads = 8, d_head = 64
+  FFN hidden = 1024 (SwiGLU), 词汇表 = 8000
+  训练数据: WikiText-2 或类似小型语料
+
+注意力变体配置:
+  MHA:   8 Q 头, 8 KV 头
+  MQA:   8 Q 头, 1 KV 头
+  GQA-2: 8 Q 头, 2 KV 组
+  GQA-4: 8 Q 头, 4 KV 组
+  MLA:   8 Q 头, d_c=128, d_r=32
+```
+
+**测量指标**：
+
+1. **KV Cache 大小**（理论值和实测值）：
+   - 理论值：根据公式直接计算
+   - 实测值：使用 `torch.cuda.memory_allocated()` 在分配 KV Cache 前后测量差值
+   - 绘制二者的对比柱状图，验证理论预测的准确性
+
+2. **生成质量**：
+   - Perplexity (PPL)：在验证集上测量
+   - 生成样本的定性分析
+
+3. **推理延迟**：
+   - Prefill 阶段延迟
+   - 单步 Decode 延迟
+   - 端到端生成 128 token 的延迟
+
+**关键代码提示**：
+
+```python
+# 五种注意力应共享同一个 Transformer 架构
+# 只需替换注意力模块
+class FlexibleTransformer(nn.Module):
+    def __init__(self, config, attention_type='mha'):
+        # ...
+        if attention_type == 'mha':
+            self.attn = MultiHeadAttention(...)
+        elif attention_type == 'mqa':
+            self.attn = MultiQueryAttention(...)
+        elif attention_type.startswith('gqa'):
+            n_groups = int(attention_type.split('-')[1])
+            self.attn = GroupedQueryAttention(..., n_kv_groups=n_groups)
+        elif attention_type == 'mla':
+            self.attn = MultiLatentAttention(..., d_compress=128, d_rope=32)
+```
+
+**思考题**：
+- KV Cache 压缩到什么程度会开始明显损害生成质量？
+- MLA 在这个小模型上的优势是否不如大模型上明显？为什么？
+- 如果增加训练步数（过度训练），能否弥补 KV 压缩带来的质量损失？
+
+---
+
 ## 本章小结
 
 ### 核心知识点
@@ -767,7 +1056,8 @@ def measure_kv_cache_memory(attn_type, config, seq_len, batch_size):
 2. **MQA**：所有 Q 头共享一组 KV，KV Cache 压缩 $n_h$ 倍，但质量有损
 3. **GQA**：分组共享 KV，是 MHA 和 MQA 的折中，被 Llama 2/3 等广泛采用
 4. **MLA**：低秩压缩 KV 到潜在空间，兼顾缓存压缩和模型质量，是 DeepSeek 的核心创新
-5. **Sequence Packing**：消除 padding 浪费，需要 Block-Diagonal 掩码
+5. **Flash Attention**：IO 感知的分块注意力计算，不改变数学结果，但大幅减少 HBM 访问，与 KV 压缩正交互补
+6. **Sequence Packing**：消除 padding 浪费，需要 Block-Diagonal 掩码
 
 ### 数学要点
 
@@ -781,7 +1071,8 @@ def measure_kv_cache_memory(attn_type, config, seq_len, batch_size):
 1. GQA 是当前工业界最广泛采用的注意力变体
 2. MLA 提供了更好的质量-效率平衡，但实现复杂度更高
 3. 从 MHA 到 GQA 的转换可以通过 uptraining 完成
-4. Sequence Packing 可显著提升训练吞吐量
+4. Flash Attention 是当前推理和训练的标配优化，与 KV 压缩方案组合使用
+5. Sequence Packing 可显著提升训练吞吐量
 
 ---
 
@@ -805,3 +1096,26 @@ def measure_kv_cache_memory(attn_type, config, seq_len, batch_size):
 ---
 
 **下一章预告**：[模块6: MoE -- 混合专家模型](../06_moe/README.md) - 理解稀疏激活的专家路由机制，以及 DeepSeek 的细粒度 MoE 创新。
+
+### 从注意力优化到 MoE：过渡思考
+
+本模块讨论的注意力变体（MQA、GQA、MLA）优化的是 Transformer 中"**每个 token 如何看到其他 token**"的效率——通过压缩 KV Cache 降低推理开销。
+
+模块 6 将探索一个不同但互补的优化维度：**每个 token 如何被处理**。标准 Transformer 中，每个 token 都经过完全相同的 FFN 层，而 MoE 架构只激活部分专家（FFN）来处理每个 token，实现"稀疏激活"。
+
+这两个优化维度可以**正交组合**——DeepSeek-V2/V3 正是同时使用了 MLA（注意力优化）和细粒度 MoE（FFN 优化），在 671B 总参数的模型上实现了仅 37B 激活参数的高效推理，成为当前最具成本效率的大模型之一。
+
+```mermaid
+graph TB
+    subgraph "Transformer Block 的两个优化维度"
+        Input["输入 token x"]
+        Attn["注意力层<br/><strong>本模块优化目标</strong><br/>MHA → MQA/GQA/MLA<br/>优化'看什么'的效率"]
+        FFN["前馈网络层<br/><strong>模块 6 优化目标</strong><br/>Dense FFN → MoE<br/>优化'怎么处理'的效率"]
+        Output["输出"]
+
+        Input --> Attn --> FFN --> Output
+    end
+
+    style Attn fill:#fce4ec,stroke:#c62828,stroke-width:2px
+    style FFN fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+```

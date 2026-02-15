@@ -11,6 +11,8 @@
 - [3. Anthropic 的注意力可解释性研究](#3-anthropic-的注意力可解释性研究)
 - [4. FlashAttention：IO 感知的精确注意力](#4-flashattentionio-感知的精确注意力)
 - [5. 前沿话题](#5-前沿话题)
+- [6. Google 与 DeepSeek 的注意力创新对比](#6-google-与-deepseek-的注意力创新对比)
+- [7. 注意力机制前沿研究补充](#7-注意力机制前沿研究补充)
 
 ---
 
@@ -456,6 +458,169 @@ DeepSeek 近期提出了一种硬件友好的稀疏注意力方案，结合了�
 
 ---
 
+## 6. Google 与 DeepSeek 的注意力创新对比
+
+### 6.1 两条截然不同的技术路线
+
+Google 和 DeepSeek 在注意力机制优化上走了两条截然不同的路线，反映了不同的工程哲学：
+
+```mermaid
+graph LR
+    subgraph "Google 路线: 渐进式共享"
+        G1["MHA<br/>(Transformer 2017)"] -->|"极端共享"| G2["MQA<br/>(PaLM 2022)"]
+        G2 -->|"折中修正"| G3["GQA<br/>(Gemma 2024)"]
+    end
+
+    subgraph "DeepSeek 路线: 低秩压缩"
+        D1["MHA<br/>(V1 2023)"] -->|"维度压缩"| D2["MLA<br/>(V2 2024)"]
+        D2 -->|"与 MoE 协同"| D3["MLA 改进<br/>(V3 2024)"]
+    end
+
+    style G3 fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style D3 fill:#fce4ec,stroke:#c62828,stroke-width:2px
+```
+
+| 对比维度 | Google (GQA) | DeepSeek (MLA) |
+|----------|-------------|----------------|
+| **核心思想** | 在头维度共享 KV | 在表示维度压缩 KV |
+| **压缩位置** | 减少 KV 头数 | 降低 KV 表示维度 |
+| **信息损失来源** | 组内头的多样性被抹平 | 低秩近似的重建误差 |
+| **头的独立性** | 组内共享，组间独立 | 全部独立（解压后） |
+| **可调节性** | 组数 $G$（离散选择） | 压缩维度 $d_c$（连续调节） |
+| **与已有模型兼容** | 可从 MHA 转换 (uptraining) | 需从头训练 |
+| **实现复杂度** | 简单（修改头映射） | 中等（压缩/解压缩投影） |
+| **工业采用度** | 极广（Llama, Gemma, Mistral...） | DeepSeek 独有 |
+
+### 6.2 Google 的多查询注意力演进细节
+
+**PaLM (2022) 的 MQA 决策**：
+- PaLM 540B 使用 MQA，所有 118 个 Q 头共享 1 组 KV
+- 选择 MQA 的核心原因：540B 参数模型的推理成本极高，KV Cache 压缩的收益巨大
+- 代价：在部分需要精细注意力区分的任务（如代码生成、数学推理）上观察到质量退化
+
+**Gemma 2 (2024) 的差异化策略**：
+- 2B 模型：使用 MQA（等效 $G=1$），因为小模型头数少，MQA 的质量损失可接受
+- 9B/27B 模型：使用 GQA-4，在质量和效率之间取得平衡
+- **关键洞察**：Google 根据模型规模动态选择注意力策略，而非一刀切
+
+### 6.3 DeepSeek MLA 在 V3 中的进一步优化
+
+DeepSeek-V3 相比 V2 在 MLA 上做了以下改进：
+
+1. **与 MoE 的协同优化**：MLA 的低秩结构减少了注意力层的通信量，使得 Expert Parallelism 中的 All-to-All 通信成为主要瓶颈，进而针对性优化
+2. **FP8 精度适配**：MLA 的压缩-解压缩投影链（$x \to c_{KV} \to K/V$）对数值精度敏感，V3 设计了针对性的缩放策略以保持 FP8 训练的稳定性
+3. **Multi-Token Prediction 兼容**：V3 的 MTP 辅助目标需要同时预测多个未来 token，MLA 的压缩表示 $c_{KV}$ 需要同时服务于多个预测头
+
+### 6.4 未来方向：自适应注意力模式
+
+一个值得关注的研究方向是**不同层使用不同的注意力变体**：
+
+- 浅层（靠近输入）：可能不需要太多独立注意力头，使用 GQA 或 MQA 即可
+- 深层（靠近输出）：可能需要更精细的注意力区分，使用 MHA 或 MLA
+- 这种混合策略已经在 Gemma 2 的局部/全局注意力交替中初现端倪
+
+另一个方向是**动态压缩率**：根据输入内容的复杂度，自适应地调整 MLA 的压缩维度 $d_c$。简单内容（重复文本、模板化文本）使用更小的 $d_c$，复杂内容（推理链、代码）使用更大的 $d_c$。
+
+---
+
+## 7. 注意力机制前沿研究补充
+
+### 7.1 Differential Attention (Diff Attention)
+
+**Differential Attention** (Ye et al., 2024, Microsoft) 提出了一种消除注意力噪声的新方法。
+
+**核心问题**：标准 Softmax 注意力的一个固有缺陷是注意力权重非负——即使某个位置与当前 query 完全不相关，它仍然会获得一个非零的注意力权重。在长序列中，这些"背景噪声"累积后会稀释有效信号。
+
+**解决方案**：使用两组注意力分数的差值：
+
+$$\text{DiffAttn}(X) = \left(\text{softmax}\left(\frac{Q_1 K_1^T}{\sqrt{d}}\right) - \lambda \cdot \text{softmax}\left(\frac{Q_2 K_2^T}{\sqrt{d}}\right)\right) V$$
+
+其中 $\lambda$ 是可学习的标量参数，$Q_1, K_1$ 和 $Q_2, K_2$ 是两组独立的投影。
+
+**数学直觉**：
+- 第一个 Softmax 捕获"应该关注什么"（信号 + 噪声）
+- 第二个 Softmax 捕获"背景注意力模式"（主要是噪声）
+- 差值实现了噪声消除，使得最终注意力权重可以非常接近零（甚至为负）
+
+**实验结果**：
+- 在信息检索（Needle-in-a-Haystack）任务上，Diff Attention 的表现显著优于标准注意力
+- 在长序列（32K+ token）上效果尤为明显，因为此时背景噪声更严重
+- 额外计算开销：约增加 2x KV 头参数（需要两组 K），但可以通过将每组头维度减半来保持总参数量不变
+
+**与 MLA/GQA 的关系**：Diff Attention 与 KV 压缩是正交的优化方向——前者解决注意力权重的噪声问题，后者解决 KV Cache 的大小问题，理论上可以组合使用。
+
+### 7.2 Linear Attention 与 State Space Models (SSM)
+
+**从注意力到线性递推**：
+
+标准注意力的核心操作是 $\text{softmax}(QK^T)V$，复杂度为 $O(N^2 d)$。线性注意力和 SSM 都试图将这个操作变为 $O(N)$ 或 $O(Nd)$，但采用了不同的技术路径：
+
+```mermaid
+graph TB
+    Root["序列建模的计算效率"]
+    Root --> SA["标准注意力<br/>O(N^2 d)<br/>精确但慢"]
+    Root --> LA["线性注意力<br/>O(Nd^2)<br/>核函数近似"]
+    Root --> SSM["State Space Models<br/>O(Nd)<br/>线性递推"]
+
+    SA --> FA["FlashAttention<br/>减少 IO，不改变复杂度"]
+    LA --> LA1["Performer, Linear Transformer<br/>核函数选择是难点"]
+    SSM --> SSM1["S4, Mamba<br/>选择性状态更新"]
+
+    SSM --> Hybrid["混合架构<br/>Jamba, Mamba-2"]
+    SA --> Hybrid
+
+    style SA fill:#ffcdd2
+    style LA fill:#fff3e0
+    style SSM fill:#e8f5e9
+    style Hybrid fill:#e3f2fd
+```
+
+**Mamba 架构 (Gu & Dao, 2023)**：
+
+Mamba 是当前最有影响力的非 Transformer 序列模型，其核心创新是**选择性 SSM**——让状态更新规则依赖于输入：
+
+$$h_t = \bar{A}_t h_{t-1} + \bar{B}_t x_t$$
+$$y_t = C_t h_t$$
+
+其中 $\bar{A}_t, \bar{B}_t, C_t$ 都是输入依赖的（通过可学习的投影从 $x_t$ 计算）。
+
+**Mamba vs Transformer 的优劣**：
+
+| 维度 | Transformer (注意力) | Mamba (SSM) |
+|------|---------------------|-------------|
+| 训练复杂度 | $O(N^2 d)$ | $O(Nd)$ |
+| 推理复杂度（每步） | $O(Nd)$（有 KV Cache） | $O(d^2)$（状态固定大小） |
+| 长距离依赖 | 精确（直接访问所有位置） | 近似（通过状态传递） |
+| 精确检索能力 | 强（Induction Head） | 弱（"Lost in the State"） |
+| 推理时内存 | $O(N)$（KV Cache 线性增长） | $O(1)$（状态固定大小） |
+| 并行训练 | 高效（矩阵乘法） | 高效（扫描算法） |
+
+**当前局限**：Mamba 在需要精确信息检索的任务（如从长文档中找到特定事实）上仍不如 Transformer，这被称为"Recall 差距"。
+
+### 7.3 混合架构：Jamba
+
+**Jamba** (AI21, 2024) 是工业界第一个大规模部署的 Transformer-Mamba 混合架构：
+
+**架构设计**：
+- 交替堆叠 Transformer 层和 Mamba 层（比例约 1:7，即每 8 层中 1 层 Transformer + 7 层 Mamba）
+- Transformer 层使用 GQA，负责精确检索
+- Mamba 层负责高效的序列处理
+- 结合 MoE 实现稀疏激活
+
+**设计逻辑**：
+- 大部分序列处理不需要精确的全局注意力，Mamba 足够
+- 少量 Transformer 层提供"精确检索锚点"，防止信息丢失
+- 这种混合策略使得 KV Cache 只需要为 Transformer 层维护，大幅减少推理内存
+
+**性能表现**：
+- 在标准 LLM benchmark 上接近同规模纯 Transformer 模型
+- 长上下文（256K token）能力优于纯 Transformer（得益于 Mamba 层的高效长距离建模）
+- 推理速度：在长序列上快约 5x（因为大部分层不需要 KV Cache）
+
+**展望**：混合架构可能代表了注意力机制演进的一个重要方向——不再执着于单一的序列建模机制，而是根据任务需求组合不同的计算原语。
+
+---
+
 ## 参考资料
 
 ### 论文
@@ -474,6 +639,9 @@ DeepSeek 近期提出了一种硬件友好的稀疏注意力方案，结合了�
 12. Johnson & Lindenstrauss (1984). *Extensions of Lipschitz Mappings into a Hilbert Space.*
 13. Chowdhery et al. (2022). *PaLM: Scaling Language Modeling with Pathways.* Google.
 14. Katharopoulos et al. (2020). *Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention.*
+15. Gu & Dao (2023). *Mamba: Linear-Time Sequence Modeling with Selective State Spaces.*
+16. Lieber et al. (2024). *Jamba: A Hybrid Transformer-Mamba Language Model.* AI21 Labs.
+17. DeepSeek-AI (2025). *Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention.*
 
 ### 博客
 
