@@ -114,6 +114,93 @@ graph TB
 | KV Cache兼容 | 良好 | 良好 |
 | 理论基础 | 启发式设计 | 旋转群的数学性质 |
 
+### 1.5 RoPE 的旋转矩阵几何直觉
+
+理解 RoPE 的数学本质，需要从**二维旋转的几何意义**出发。
+
+#### 复数视角
+
+将二维实向量 $(x_1, x_2)$ 视为复数 $z = x_1 + i x_2$，则 RoPE 的旋转操作等价于**复数乘法**：
+
+$$\text{RoPE}(z, m) = z \cdot e^{im\theta} = (x_1 + ix_2)(\cos m\theta + i\sin m\theta)$$
+
+展开为实部和虚部：
+
+$$\text{Re}[\text{RoPE}(z, m)] = x_1 \cos m\theta - x_2 \sin m\theta$$
+$$\text{Im}[\text{RoPE}(z, m)] = x_1 \sin m\theta + x_2 \cos m\theta$$
+
+这正是旋转矩阵 $R_m$ 的逐元素展开形式。
+
+**几何直觉**：RoPE 将每对维度 $(x_{2i-1}, x_{2i})$ 视为一个二维平面上的点，位置 $m$ 的编码等价于在这个平面上**逆时针旋转** $m\theta_i$ 角度。
+
+```mermaid
+graph TB
+    subgraph "RoPE 的几何含义"
+        A["原始向量 (x₁, x₂)<br/>在二维平面上"]
+        B["旋转 mθ 角度<br/>→ (x₁', x₂')"]
+        C["位置 m 越大<br/>旋转角度越大"]
+    end
+    A --> B --> C
+```
+
+#### 高维的"分频段旋转"
+
+对于 $d$ 维向量，RoPE 将其分成 $d/2$ 个二维平面，**每个平面使用不同的旋转频率**：
+
+$$\theta_i = \text{base}^{-2(i-1)/d}, \quad i = 1, 2, \ldots, d/2$$
+
+- **第 1 对维度**：$\theta_1 = 1$，旋转频率最高，位置每增加 1 就旋转约 $57.3°$
+- **最后一对维度**：$\theta_{d/2} = 1/\text{base}$，旋转频率极低，位置增加 base 才旋转一圈
+
+这种**多尺度设计**使得：
+- 高频维度编码局部位置差异（相邻 token 有明显不同）
+- 低频维度编码全局位置信息（只有距离很远的 token 才有显著差异）
+
+#### 为什么 base = 10000？
+
+频率基数 base 决定了**最低频率维度的周期长度**：
+
+$$T_{max} = 2\pi \cdot \text{base} \approx 62832 \text{ positions}$$
+
+- 如果 base 太小（如 100），最低频维度的周期仅约 628 个位置，超出后位置编码开始重复
+- 如果 base 太大（如 1000000），低频维度变化过于缓慢，在短序列中几乎不携带位置信息
+
+原始论文选择 base = 10000 是一个经验值，使得在 2048-8192 长度范围内各频率维度都能有效工作。后续 Llama 3 和 Gemma 对此进行了调整。
+
+### 1.6 Gemma / Llama 3 的 RoPE 配置对比
+
+不同模型对 RoPE 的 base 和上下文长度进行了不同的配置，反映了各自在长度外推与表达精度之间的权衡：
+
+| 模型 | $d_{model}$ | $d_{head}$ | RoPE Base | 训练上下文长度 | 外推策略 |
+|------|:-----------:|:----------:|:---------:|:------------:|---------|
+| Llama 2 7B | 4096 | 128 | 10,000 | 4K | 无 / PI |
+| Llama 3 8B | 4096 | 128 | 500,000 | 8K | 高 base + 扩展训练 |
+| Llama 3.1 8B | 4096 | 128 | 500,000 | 128K | 高 base + 渐进扩展 |
+| Gemma 1 7B | 3072 | 256 | 10,000 | 8K | 标准 RoPE |
+| Gemma 2 9B | 3584 | 256 | 10,000 | 8K | 局部/全局交替注意力 |
+| DeepSeek-V2 | 5120 | 128 | 10,000 | 4K → 128K | 解耦 RoPE + YaRN |
+| DeepSeek-V3 | 7168 | 128 | 10,000 | 4K → 128K | 解耦 RoPE + YaRN |
+
+**Llama 3 的关键设计决策**：
+
+Llama 3 将 RoPE base 从 10,000 大幅提升至 **500,000**，这一改变的数学含义是：
+
+$$\theta_i^{(\text{Llama3})} = 500000^{-2(i-1)/d} \ll \theta_i^{(\text{Llama2})} = 10000^{-2(i-1)/d}$$
+
+对于相同的维度 $i$，Llama 3 的旋转频率**更低**，这意味着：
+1. 相邻位置的向量差异更小（更平滑）
+2. 最低频维度的周期从约 6.3 万个位置扩展到约 314 万个位置
+3. 天然支持更长的序列，而不需要依赖后续的 PI 或 NTK 插值
+
+**代价**：高频维度的位置区分能力下降。Llama 3 通过增加训练数据量和训练步数来弥补这一损失。
+
+**Gemma 2 的替代思路**：
+
+Gemma 2 没有修改 RoPE base，而是采用**局部-全局交替注意力**：
+- 奇数层使用滑动窗口注意力（窗口 4096），仅关注局部上下文
+- 偶数层使用全局注意力，处理长距离依赖
+- 这种设计减少了对位置编码长距离外推能力的依赖
+
 ---
 
 ## 2. DeepSeek 的位置编码实践
@@ -195,7 +282,91 @@ $$\theta_i' = \begin{cases}
 - 低频维度（波长长）：线性插值缩放，这些维度编码全局位置，需要平滑处理
 - 中间频率：在两种策略间平滑过渡
 
-### 2.3 MLA 的 KV Cache 效率
+### 2.3 YaRN 与长上下文外推的数学细节
+
+YaRN 的设计基于对 RoPE 外推失败原因的深入分析。以下详细推导其核心方法。
+
+#### Position Interpolation (PI) 的局限
+
+Position Interpolation（Chen et al., 2023）是最朴素的 RoPE 外推方案：
+
+$$\theta_i^{PI} = \frac{\theta_i}{s}, \quad s = \frac{L'}{L}$$
+
+其中 $L$ 是原始训练长度，$L'$ 是目标长度。
+
+**问题**：PI 对所有频率维度使用相同的缩放因子 $s$，但不同频率的维度对缩放的敏感度不同：
+- 高频维度（编码局部位置）：缩放后局部位置区分能力大幅下降
+- 低频维度（编码全局位置）：缩放是合理的
+
+#### NTK-Aware 插值
+
+NTK-Aware 插值（bloc97, 2023）的核心思想是：**修改 RoPE 的 base 而非直接缩放频率**。
+
+$$\text{base}' = \text{base} \cdot s^{d/(d-2)}$$
+
+这等价于对不同频率维度施加不同的缩放：
+
+$$\theta_i^{NTK} = (\text{base}')^{-2(i-1)/d} = \text{base}^{-2(i-1)/d} \cdot s^{-2(i-1)/(d-2)}$$
+
+**关键性质**：
+
+- 对于 $i = 1$（最高频维度）：$\theta_1^{NTK} = 1 \cdot s^0 = 1$，**完全不缩放**
+- 对于 $i = d/2$（最低频维度）：$\theta_{d/2}^{NTK} \approx \theta_{d/2} / s$，**接近线性插值**
+- 中间维度：缩放程度平滑过渡
+
+```mermaid
+graph LR
+    subgraph "NTK-Aware 各维度缩放"
+        A["高频维度 (i=1)<br/>几乎不缩放<br/>保留局部精度"]
+        B["中间维度<br/>中等缩放<br/>平滑过渡"]
+        C["低频维度 (i=d/2)<br/>接近 1/s 缩放<br/>外推长距离"]
+    end
+    A --> B --> C
+```
+
+#### 动态 NTK (Dynamic NTK)
+
+动态 NTK 在推理时根据当前序列长度动态调整 base：
+
+$$\text{base}'(n) = \text{base} \cdot \left(\frac{\alpha \cdot n}{L}\right)^{d/(d-2)}$$
+
+其中 $n$ 是当前序列位置，$\alpha$ 是调节因子。
+
+**优势**：序列长度在训练范围内时不做任何修改，仅在超出训练长度后才开始渐进式缩放。
+
+#### YaRN 的完整方案
+
+YaRN 在 NTK-Aware 的基础上引入了两个额外改进：
+
+**1. 分频段策略（已在 2.2 节描述）**：
+
+将频率维度分为三个区域：
+- $\lambda(\theta_i) > \beta$：高频区域，直接外推
+- $\lambda(\theta_i) < \alpha$：低频区域，线性插值
+- 中间区域：线性混合
+
+其中 $\alpha, \beta$ 通常设为 $\alpha = 1, \beta = 32$。
+
+**2. 注意力缩放因子**：
+
+YaRN 发现外推后注意力分数的方差会增大，因此引入温度修正：
+
+$$\text{score}(q_m, k_n) = \frac{(\mathbf{R}_m' \mathbf{q})^T (\mathbf{R}_n' \mathbf{k})}{\sqrt{d_k}} \cdot \frac{1}{\sqrt{t}}$$
+
+其中 $t = 0.1 \ln(s) + 1$ 是与缩放因子 $s$ 相关的温度修正项。
+
+**直觉**：外推使得 Q/K 向量在旋转后的点积分布发生变化，温度修正将其恢复到合理范围。
+
+**YaRN 效果总结**：
+
+| 方法 | 4K→16K | 4K→64K | 4K→128K | 需要微调 |
+|------|:------:|:------:|:-------:|:------:|
+| PI | 较好 | 差 | 很差 | 是 |
+| NTK-Aware | 好 | 中等 | 差 | 可选 |
+| Dynamic NTK | 好 | 较好 | 中等 | 否 |
+| YaRN | 好 | 好 | 较好 | 少量 |
+
+### 2.4 MLA 的 KV Cache 效率
 
 MLA 的位置编码设计直接影响推理效率：
 
@@ -535,8 +706,13 @@ graph TB
 10. Xiao et al. (2023). *Efficient Streaming Language Models with Attention Sinks*.
 11. Peng et al. (2023). *YaRN: Efficient Context Window Extension of Large Language Models*.
 12. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model*.
+13. Chen et al. (2023). *Extending Context Window of Large Language Models via Position Interpolation*.
+14. Meta AI (2024). *Llama 3 Model Card and Technical Report*.
+15. Team Gemma (2024). *Gemma 2: Improving Open Language Models at a Practical Size*. Google.
 
 ### 博客
 1. [Rotary Positional Embeddings - EleutherAI](https://blog.eleuther.ai/rotary-embeddings/)
 2. [Transformer Circuits Thread - Anthropic](https://transformer-circuits.pub/)
 3. [Understanding Superposition - Anthropic](https://transformer-circuits.pub/2022/toy_model/index.html)
+4. [NTK-Aware Scaled RoPE - bloc97](https://www.reddit.com/r/LocalLLaMA/comments/14lz7j5/ntkaware_scaled_rope_allows_llama_models_to_have/)
+5. [Extending Context Window of Llama - kaiokendev](https://kaiokendev.github.io/context)

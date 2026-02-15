@@ -1,18 +1,36 @@
 # 模块15：RAG 与知识增强 -- 检索、向量库与 GraphRAG
 
-> 大语言模型的"幻觉"问题和知识截止（Knowledge Cutoff）是其在实际应用中的核心痛点。RAG（Retrieval-Augmented Generation）通过引入外部知识库，让模型在生成时"查阅资料"，从根本上缓解了这两大问题。本章将从 RAG 的数学范式出发，深入剖析向量检索、稀疏检索、混合搜索、GraphRAG 等核心技术，并结合 Google、DeepSeek、Anthropic 三条技术线的工业实践，带你构建完整的知识增强系统。
+> **模块定位**：RAG（Retrieval-Augmented Generation）是大语言模型从"实验室技术"走向"实际落地"最关键的范式之一。在前几个模块中，我们已经学习了如何训练模型（Module 8-10）、如何对齐人类偏好（Module 11-12）、如何高效推理（Module 13-14），但这些技术距离真正解决用户问题还有一步之遥——模型需要**可靠的外部知识**来回答事实性问题。RAG 正是连接"模型推理能力"与"真实世界知识"的桥梁。同时，本模块也为 Module 16（前沿专题与终极项目）铺设基础：在前沿研究中，RAG 正与 Agent、多模态、长上下文等方向深度融合，成为几乎所有 LLM 应用系统的核心组件。
+
+> 大语言模型的"幻觉"问题和知识截止（Knowledge Cutoff）是其在实际应用中的核心痛点。RAG 通过引入外部知识库，让模型在生成时"查阅资料"，从根本上缓解了这两大问题。本章将从 RAG 的数学范式出发，深入剖析向量检索、稀疏检索、混合搜索、GraphRAG 等核心技术，并结合 Google、DeepSeek、Anthropic 三条技术线的工业实践，带你构建完整的知识增强系统。
+
+```mermaid
+graph LR
+    M2["Module 2<br/>Embedding"] -.->|"向量表示基础"| M15
+    M14["Module 14<br/>Inference<br/>推理优化"] --> M15["<b>Module 15<br/>RAG<br/>知识增强</b>"]
+    M15 --> M16["Module 16<br/>Frontiers<br/>前沿专题"]
+
+    style M15 fill:#e8f5e9,stroke:#2e7d32,stroke-width:3px
+    style M2 fill:#e3f2fd,stroke:#1565c0,stroke-dasharray: 5 5
+    style M14 fill:#fff3e0
+    style M16 fill:#fff3e0
+```
 
 ---
 
 ## 目录
 
 - [1. RAG 核心范式](#1-rag-核心范式)
-- [2. 向量检索算法](#2-向量检索算法)
-- [3. 稀疏检索与混合搜索](#3-稀疏检索与混合搜索)
-- [4. GraphRAG：基于知识图谱的 RAG](#4-graphrag基于知识图谱的-rag)
-- [5. 三条技术线的 RAG 实践](#5-三条技术线的-rag-实践)
-- [6. 项目实践](#6-项目实践)
-- [7. 本章小结](#7-本章小结)
+- [2. RAG 系统架构全景](#2-rag-系统架构全景)
+- [3. 向量检索算法](#3-向量检索算法)
+- [4. 稀疏检索与混合搜索](#4-稀疏检索与混合搜索)
+- [5. 检索策略深度对比](#5-检索策略深度对比)
+- [6. Chunk 策略工程实践](#6-chunk-策略工程实践)
+- [7. GraphRAG：基于知识图谱的 RAG](#7-graphrag基于知识图谱的-rag)
+- [8. RAG 评估框架](#8-rag-评估框架)
+- [9. 三条技术线的 RAG 实践](#9-三条技术线的-rag-实践)
+- [10. 项目实践](#10-项目实践)
+- [11. 本章小结](#11-本章小结)
 - [参考资料](#参考资料)
 
 ---
@@ -231,9 +249,143 @@ $$\text{score}(q, d) = \sigma(W \cdot h_{[\text{CLS}]})$$
 
 ---
 
-## 2. 向量检索算法
+## 2. RAG 系统架构全景
 
-### 2.1 稠密检索（Dense Retrieval）
+RAG 技术经历了从简单到复杂的演进过程，按照架构复杂度可以划分为三代：**Naive RAG → Advanced RAG → Modular RAG**。理解这条演进路径，有助于我们在实际项目中根据需求选择合适的架构层级。
+
+### 2.1 三代 RAG 架构演进
+
+```mermaid
+graph TB
+    subgraph "第一代: Naive RAG"
+        N1["Index: 简单分块+嵌入"] --> N2["Retrieve: 向量Top-K"]
+        N2 --> N3["Generate: 拼接后生成"]
+    end
+
+    subgraph "第二代: Advanced RAG"
+        A1["Index: 多策略分块"] --> A2["Pre-Retrieval:<br/>Query重写/HyDE"]
+        A2 --> A3["Retrieve: 混合检索"]
+        A3 --> A4["Post-Retrieval:<br/>Reranking/压缩"]
+        A4 --> A5["Generate: 增强生成"]
+    end
+
+    subgraph "第三代: Modular RAG"
+        M1["模块化组件池"]
+        M1 --> M2["Routing: 查询路由"]
+        M2 --> M3["Retrieval Module"]
+        M2 --> M4["Memory Module"]
+        M2 --> M5["Tool Module"]
+        M3 --> M6["Fusion & Orchestration"]
+        M4 --> M6
+        M5 --> M6
+        M6 --> M7["Adaptive Generation"]
+    end
+
+    N3 -.->|"演进"| A1
+    A5 -.->|"演进"| M1
+
+    style N1 fill:#ffcdd2
+    style N2 fill:#ffcdd2
+    style N3 fill:#ffcdd2
+    style A1 fill:#fff9c4
+    style A5 fill:#fff9c4
+    style M1 fill:#c8e6c9
+    style M7 fill:#c8e6c9
+```
+
+#### Naive RAG 的典型问题
+
+Naive RAG 虽然实现简单，但在生产环境中常常遇到以下瓶颈：
+
+| 问题类别 | 具体表现 | 根本原因 |
+|---------|---------|---------|
+| **检索质量低** | 返回的文档与问题不相关 | Query 与 Document 的语义鸿沟 |
+| **信息冗余** | Top-K 文档内容高度重复 | 缺少去重和多样性控制 |
+| **上下文过长** | Prompt 超过模型窗口限制 | 缺少压缩和筛选机制 |
+| **答案不忠实** | 模型编造检索中没有的内容 | 缺少忠实度约束 |
+| **无法回答全局问题** | "文档讲了哪些主题？"无法回答 | 检索粒度为 chunk，缺少全局视角 |
+
+#### Advanced RAG 的优化策略
+
+Advanced RAG 通过在检索流程的**前、中、后**三个阶段引入优化策略来解决上述问题（详见 1.4-1.8 节）。
+
+#### Modular RAG：面向生产的模块化架构
+
+Modular RAG 是当前 RAG 系统的最新范式，其核心理念是将 RAG 系统拆解为**可插拔的功能模块**，通过编排（Orchestration）实现灵活组合。
+
+**Modular RAG 的核心模块**：
+
+| 模块 | 职责 | 示例实现 |
+|------|------|---------|
+| **Indexing** | 文档解析、分块、索引构建 | LlamaIndex, Unstructured |
+| **Routing** | 查询分类、路由到不同检索路径 | LLM-based Router |
+| **Retrieval** | 执行实际的检索操作 | Dense/Sparse/Hybrid/GraphRAG |
+| **Reranking** | 对检索结果重排序 | Cross-Encoder, Cohere Rerank |
+| **Memory** | 维护对话历史和上下文 | 向量化对话历史 |
+| **Generation** | 基于检索结果生成回答 | LLM + Prompt Template |
+| **Evaluation** | 评估检索和生成质量 | RAGAS, TruLens |
+
+**Modular RAG 与 Agentic RAG 的关系**：
+
+Modular RAG 为 Agentic RAG 奠定了基础。当 Routing 模块由 LLM Agent 控制时，系统就从"流水线式"升级为"智能体式"——Agent 可以根据中间结果动态决定下一步调用哪个模块、是否需要重新检索、是否需要使用工具等。
+
+### 2.2 RAG 系统全景图
+
+从工程角度，一个完整的 RAG 系统涉及以下技术栈：
+
+```mermaid
+graph TB
+    subgraph "数据层"
+        D1["文档加载<br/>(PDF/HTML/Markdown)"]
+        D2["文档解析<br/>(OCR/表格抽取)"]
+        D3["文本清洗<br/>(去噪/标准化)"]
+        D1 --> D2 --> D3
+    end
+
+    subgraph "索引层"
+        I1["分块策略<br/>(Fixed/Semantic/Recursive)"]
+        I2["向量化<br/>(BGE/E5/OpenAI)"]
+        I3["索引存储<br/>(Faiss/Milvus/pgvector)"]
+        D3 --> I1 --> I2 --> I3
+    end
+
+    subgraph "检索层"
+        R1["查询理解<br/>(重写/扩展/HyDE)"]
+        R2["多路检索<br/>(Dense+Sparse+Graph)"]
+        R3["结果融合<br/>(RRF/加权)"]
+        R4["重排序<br/>(Cross-Encoder)"]
+        R1 --> R2 --> R3 --> R4
+    end
+
+    subgraph "生成层"
+        G1["Prompt 构建<br/>(模板+上下文注入)"]
+        G2["LLM 生成<br/>(GPT/Claude/DeepSeek)"]
+        G3["后处理<br/>(引用标注/格式化)"]
+        R4 --> G1 --> G2 --> G3
+    end
+
+    subgraph "评估层"
+        E1["检索评估<br/>(Recall/MRR/NDCG)"]
+        E2["生成评估<br/>(Faithfulness/Relevancy)"]
+        E3["端到端评估<br/>(用户满意度)"]
+    end
+
+    G3 --> E1
+    G3 --> E2
+    G3 --> E3
+
+    style D1 fill:#e3f2fd
+    style I3 fill:#fff3e0
+    style R4 fill:#f3e5f5
+    style G3 fill:#e8f5e9
+    style E3 fill:#fce4ec
+```
+
+---
+
+## 3. 向量检索算法
+
+### 3.1 稠密检索（Dense Retrieval）
 
 #### 双塔架构（Bi-Encoder）
 
@@ -299,7 +451,7 @@ $$\mathcal{L}_i = -\log \text{softmax}(\mathbf{s}_i)[i]$$
 
 仅使用 batch 内随机负样本效果有限。工业实践中常用 BM25 或上一轮模型检索的高排名但非正例的文档作为"难负样本"，显著提升训练效果。
 
-### 2.2 ANN 近似最近邻算法
+### 3.2 ANN 近似最近邻算法
 
 #### 暴力搜索的瓶颈
 
@@ -322,11 +474,11 @@ ANN 牺牲一定的搜索精度，换取数量级的速度提升。常见方法�
 
 本节重点讲解 HNSW，因为它在工业实践中使用最广泛，且兼顾了检索精度和速度。
 
-### 2.3 HNSW（Hierarchical Navigable Small World）
+### 3.3 HNSW（Hierarchical Navigable Small World）
 
 HNSW 是目前最流行的 ANN 算法之一，由 Yuri Malkov 等人于 2018 年提出。它结合了**跳表（Skip List）**的分层思想和**小世界网络（Small World Network）**的导航性质。
 
-#### 2.3.1 核心概念：小世界网络
+#### 3.3.1 核心概念：小世界网络
 
 **小世界网络**是一类特殊的图结构，具有两个关键性质：
 1. **高聚集系数**：节点的邻居之间也倾向于互相连接（局部有序）
@@ -338,7 +490,7 @@ HNSW 是目前最流行的 ANN 算法之一，由 Yuri Malkov 等人于 2018 年
 
 NSW 在小世界网络的基础上增加了**导航性**：通过贪心搜索，可以高效地找到目标节点的近似最近邻。
 
-#### 2.3.2 跳表与分层思想
+#### 3.3.2 跳表与分层思想
 
 HNSW 在 NSW 的基础上引入了分层结构，灵感来自跳表（Skip List）：
 
@@ -386,7 +538,7 @@ $$P(\text{node at layer } l) = \frac{1}{m_L^l}$$
 
 这意味着最高层只有少数"枢纽"节点，形成稀疏的全局骨架；底层包含所有节点，提供精细的局部搜索。
 
-#### 2.3.3 贪心搜索算法
+#### 3.3.3 贪心搜索算法
 
 HNSW 的搜索过程从最高层开始，逐层向下，每层执行贪心搜索：
 
@@ -437,7 +589,7 @@ HNSW 的搜索过程从最高层开始，逐层向下，每层执行贪心搜索
 18. return results
 ```
 
-#### 2.3.4 贪心搜索的数学证明
+#### 3.3.4 贪心搜索的数学证明
 
 **定理**：在 HNSW 图中，贪心搜索的期望时间复杂度为 $O(\log N)$。
 
@@ -461,7 +613,7 @@ $$T = O(L) = O(\log N)$$
 
 **每步的距离计算成本为 $O(d)$**（$d$ 维向量的内积），因此总时间复杂度为 $O(d \cdot \log N)$。
 
-#### 2.3.5 插入算法
+#### 3.3.5 插入算法
 
 新向量的插入过程：
 
@@ -472,7 +624,7 @@ $$T = O(L) = O(\log N)$$
 
 **插入的复杂度**：与搜索相同，为 $O(d \cdot \log N)$。
 
-#### 2.3.6 HNSW 超参数
+#### 3.3.6 HNSW 超参数
 
 | 参数 | 含义 | 典型值 | 影响 |
 |------|------|--------|------|
@@ -483,7 +635,7 @@ $$T = O(L) = O(\log N)$$
 
 **精度-速度权衡**：$ef_{\text{search}}$ 是搜索时唯一可调的参数。增大 $ef$ 可以在不重建索引的情况下提升精度，但会降低搜索速度。
 
-### 2.4 其他 ANN 方法简述
+### 3.4 其他 ANN 方法简述
 
 #### IVF（Inverted File Index）
 
@@ -503,9 +655,9 @@ $$T = O(L) = O(\log N)$$
 
 ---
 
-## 3. 稀疏检索与混合搜索
+## 4. 稀疏检索与混合搜索
 
-### 3.1 BM25 算法
+### 4.1 BM25 算法
 
 BM25（Best Matching 25）是最经典的稀疏检索算法，本质上是 TF-IDF 的概率改进版。
 
@@ -568,7 +720,7 @@ graph LR
     end
 ```
 
-### 3.2 为什么关键词匹配依然重要？
+### 4.2 为什么关键词匹配依然重要？
 
 即使在深度学习时代，BM25 等稀疏检索方法仍不可替代，原因在于：
 
@@ -582,7 +734,7 @@ graph LR
 - 能理解抽象查询（如"如何提升模型效果"）
 - 能跨语言检索
 
-### 3.3 混合搜索（Hybrid Search）
+### 4.3 混合搜索（Hybrid Search）
 
 混合搜索结合了稀疏检索（BM25）和稠密检索（向量搜索）的优势。
 
@@ -602,7 +754,7 @@ graph TB
     style FIN fill:#e8f5e9
 ```
 
-### 3.4 倒数排名融合（RRF）
+### 4.4 倒数排名融合（RRF）
 
 RRF（Reciprocal Rank Fusion）是一种简单而有效的排序融合算法。
 
@@ -643,9 +795,424 @@ $$\text{RRF}_w(d) = \sum_{r \in R} w_r \cdot \frac{1}{k + \text{rank}_r(d)}$$
 
 ---
 
-## 4. GraphRAG：基于知识图谱的 RAG
+## 5. 检索策略深度对比
 
-### 4.1 动机：全局问题的挑战
+在实际 RAG 系统中，选择正确的检索策略至关重要。本节系统对比 Dense Retrieval、Sparse Retrieval 和 Hybrid Retrieval 三大策略，并深入分析 BM25 + Embedding 融合的工程实践。
+
+### 5.1 三大检索策略全面对比
+
+| 维度 | Dense Retrieval（稠密检索） | Sparse Retrieval（稀疏检索） | Hybrid Retrieval（混合检索） |
+|------|---------------------------|---------------------------|---------------------------|
+| **核心原理** | 语义向量相似度 | 词项精确匹配（TF-IDF/BM25） | 融合语义+词项匹配 |
+| **表示方式** | 低维稠密向量（768/1024维） | 高维稀疏向量（词表大小维） | 两种表示并行 |
+| **同义词处理** | 强（"大模型"≈"LLM"） | 弱（必须精确匹配） | 强 |
+| **专有名词** | 弱（可能误匹配近义词） | 强（精确匹配"GPT-4o"） | 强 |
+| **零样本泛化** | 依赖预训练质量 | 天然零样本 | 兼具两者优势 |
+| **索引大小** | 中（N * d * 4 bytes） | 小（倒排索引，稀疏存储） | 大（两套索引） |
+| **查询延迟** | 中（ANN搜索） | 低（倒排索引查找） | 较高（两路检索+融合） |
+| **训练数据需求** | 需要标注数据微调 | 无需训练 | 稠密部分需要训练 |
+| **可解释性** | 低（向量黑箱） | 高（可追溯匹配词项） | 中 |
+
+### 5.2 Dense Retrieval 的失败模式分析
+
+稠密检索在以下场景中容易失败，理解这些失败模式有助于决定何时需要引入稀疏检索或混合检索：
+
+**场景 1：专有名词和缩写**
+
+```
+查询: "DeepSeek-V3 的 MLA 架构"
+期望文档: "DeepSeek-V3 使用 Multi-head Latent Attention (MLA)..."
+Dense 检索结果: "Multi-Query Attention 在 GPT 系列中的应用..."  (错误!)
+BM25 检索结果: "DeepSeek-V3 使用 Multi-head Latent Attention (MLA)..."  (正确!)
+```
+
+**原因**：Embedding 模型将 "MLA" 映射到与 "Multi-Query Attention" 相近的语义空间，但词项级别的精确匹配可以避免这类混淆。
+
+**场景 2：长尾实体**
+
+```
+查询: "BGE-M3 在 MTEB 排行榜上的分数"
+Dense 检索结果: "各种 Embedding 模型在 MTEB 上的评测方法论..."  (不够精确)
+BM25 检索结果: "BGE-M3 在 MTEB 排行榜上的 average score 为 66.13..."  (精确匹配)
+```
+
+**场景 3：否定语义**
+
+```
+查询: "不使用 Flash Attention 的 Transformer 实现"
+Dense 检索结果: "Flash Attention 在 Transformer 中的高效实现..."  (语义相近但意图相反!)
+```
+
+稠密检索对否定词的语义理解能力有限，因为 "使用 Flash Attention" 和 "不使用 Flash Attention" 在向量空间中非常接近。
+
+### 5.3 BM25 + Embedding 融合策略
+
+在工业实践中，BM25 和 Embedding 的融合不仅限于简单的 RRF，还有更精细的策略：
+
+#### 策略 1：分数归一化融合（Score-level Fusion）
+
+$$\text{score}_{\text{hybrid}}(d) = \alpha \cdot \text{norm}(\text{score}_{\text{BM25}}(d)) + (1-\alpha) \cdot \text{norm}(\text{score}_{\text{dense}}(d))$$
+
+其中归一化函数常用 min-max normalization：
+
+$$\text{norm}(s) = \frac{s - s_{\min}}{s_{\max} - s_{\min}}$$
+
+**$\alpha$ 的选择**：
+- $\alpha = 0.5$：等权融合（默认起点）
+- $\alpha > 0.5$：偏向关键词匹配（适合专业领域、精确查询）
+- $\alpha < 0.5$：偏向语义匹配（适合口语化查询、跨语言场景）
+
+#### 策略 2：级联融合（Cascade Fusion）
+
+$$\text{candidates} = \text{BM25\_TopK1}(q) \cup \text{Dense\_TopK2}(q) \xrightarrow{\text{Reranker}} \text{Final\_TopK}$$
+
+先用两路检索各自召回一批候选文档，再用 Cross-Encoder Reranker 统一精排。这种方式的优势是：Reranker 可以学会在不同场景下自适应地加权两路检索的贡献。
+
+#### 策略 3：条件路由（Conditional Routing）
+
+```mermaid
+graph TB
+    Q["用户查询"] --> C{"查询分类器"}
+    C -->|"包含专有名词/型号"| S["BM25 为主<br/>α=0.7"]
+    C -->|"语义模糊/口语化"| D["Dense 为主<br/>α=0.3"]
+    C -->|"混合类型"| H["等权融合<br/>α=0.5"]
+    S --> R["Reranker 精排"]
+    D --> R
+    H --> R
+    R --> F["最终结果"]
+
+    style Q fill:#e3f2fd
+    style F fill:#e8f5e9
+```
+
+条件路由的核心是训练一个**查询分类器**，根据查询的特征（是否包含实体名、是否为问句、是否包含否定词等）自动选择最优的融合权重。
+
+### 5.4 Embedding 模型选型指南
+
+稠密检索的质量高度依赖 Embedding 模型的选择。以下是 2024-2025 年主流 Embedding 模型的对比：
+
+| 模型 | 维度 | 最大长度 | 多语言 | MTEB 均分 | 适用场景 |
+|------|------|---------|--------|-----------|---------|
+| **BGE-M3** (BAAI) | 1024 | 8192 | 100+ 语言 | ~66 | 多语言、长文本 |
+| **E5-Mistral-7B** | 4096 | 32768 | 多语言 | ~67 | 高精度场景 |
+| **GTE-Qwen2** (Alibaba) | 768 | 8192 | 中英 | ~65 | 中文场景 |
+| **text-embedding-3-large** (OpenAI) | 3072 | 8191 | 多语言 | ~65 | 商业API调用 |
+| **voyage-3** (Voyage AI) | 1024 | 32000 | 多语言 | ~67 | 代码检索 |
+| **Cohere embed-v3** | 1024 | 512 | 100+ 语言 | ~65 | 商业多语言 |
+
+**选型建议**：
+1. **中文为主**：优先考虑 BGE-M3 或 GTE-Qwen2（中文语料训练充分）
+2. **多语言/跨语言**：BGE-M3（支持 100+ 语言，且支持稀疏+稠密混合表示）
+3. **高精度要求**：E5-Mistral-7B（基于 LLM 的 Embedding，精度最高但推理成本大）
+4. **长文档**：E5-Mistral-7B 或 BGE-M3（支持 8K-32K 长度）
+5. **低成本/快速原型**：OpenAI text-embedding-3-small（API 方便，成本低）
+
+---
+
+## 6. Chunk 策略工程实践
+
+文档分块（Chunking）是 RAG 系统中最容易被忽视但影响深远的环节。分块策略直接决定了检索的粒度和质量——chunk 太大，检索噪声增多；chunk 太小，丢失上下文语义。
+
+### 6.1 分块策略全景
+
+```mermaid
+graph TB
+    subgraph "分块策略分类"
+        F["Fixed-size Chunking<br/>固定大小分块"]
+        S["Semantic Chunking<br/>语义分块"]
+        R["Recursive Chunking<br/>递归分块"]
+        D["Document-structure Chunking<br/>结构化分块"]
+        P["Parent-Child Chunking<br/>父子分块"]
+    end
+
+    F --> |"简单但粗糙"| Q["检索质量"]
+    S --> |"精确但计算昂贵"| Q
+    R --> |"平衡性价比"| Q
+    D --> |"利用文档结构"| Q
+    P --> |"兼顾检索与上下文"| Q
+
+    style Q fill:#e8f5e9
+```
+
+### 6.2 Fixed-size Chunking（固定大小分块）
+
+最简单的分块策略：按固定 token 数（或字符数）切分文档。
+
+**参数**：
+- `chunk_size`：每个 chunk 的 token 数（常见 256/512/1024）
+- `chunk_overlap`：相邻 chunk 的重叠 token 数（常见 50-200）
+
+```python
+def fixed_size_chunk(text: str, chunk_size: int = 512, overlap: int = 128) -> list[str]:
+    """
+    固定大小分块
+
+    参数:
+        text: 输入文本
+        chunk_size: 每个chunk的token数
+        overlap: 相邻chunk的重叠token数
+    返回:
+        分块后的文本列表
+    """
+    # 简单按字符分块(实际应用中应使用tokenizer)
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start = end - overlap  # 向后退overlap个字符，保证重叠
+    return chunks
+```
+
+**Overlap 的作用**：
+
+假设一个关键信息恰好位于两个 chunk 的边界处：
+
+```
+Chunk 1: "...Transformer 使用的位置编码方法是"
+Chunk 2: "正弦余弦函数, 具体公式为..."
+```
+
+如果没有 overlap，这条信息被割裂，两个 chunk 都无法独立回答"Transformer 使用什么位置编码"。引入 overlap 后：
+
+```
+Chunk 1: "...Transformer 使用的位置编码方法是正弦余弦函数, 具体"
+Chunk 2: "位置编码方法是正弦余弦函数, 具体公式为..."
+```
+
+两个 chunk 都包含完整信息。
+
+**固定大小分块的缺陷**：
+- 可能在句子中间切断，破坏语义完整性
+- 不同类型的内容（代码、公式、叙述文本）可能需要不同的 chunk 大小
+- 无法感知文档的逻辑结构（章节、段落）
+
+### 6.3 Semantic Chunking（语义分块）
+
+语义分块的核心思想是：**在语义断点处切分**，而不是在固定位置切分。
+
+**算法流程**：
+
+1. 将文档按句子切分
+2. 计算每个句子的 Embedding 向量
+3. 计算相邻句子之间的余弦相似度
+4. 当相邻句子的相似度**低于阈值**时，在此处切分
+
+$$\text{split at position } i \iff \text{sim}(E(s_i), E(s_{i+1})) < \theta$$
+
+```python
+import numpy as np
+
+def semantic_chunk(sentences: list[str], embeddings: np.ndarray,
+                   threshold: float = 0.5, min_chunk_size: int = 3) -> list[list[str]]:
+    """
+    语义分块: 在语义断点处切分
+
+    参数:
+        sentences: 句子列表
+        embeddings: 每个句子的embedding向量, shape=(n, d)
+        threshold: 相似度阈值, 低于此值则切分
+        min_chunk_size: 最小chunk包含的句子数
+    返回:
+        分块后的句子组列表
+    """
+    # 计算相邻句子的余弦相似度
+    similarities = []
+    for i in range(len(embeddings) - 1):
+        cos_sim = np.dot(embeddings[i], embeddings[i+1]) / (
+            np.linalg.norm(embeddings[i]) * np.linalg.norm(embeddings[i+1]) + 1e-8
+        )
+        similarities.append(cos_sim)
+
+    # 在相似度低谷处切分
+    chunks = []
+    current_chunk = [sentences[0]]
+    for i, sim in enumerate(similarities):
+        if sim < threshold and len(current_chunk) >= min_chunk_size:
+            chunks.append(current_chunk)
+            current_chunk = [sentences[i+1]]
+        else:
+            current_chunk.append(sentences[i+1])
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+```
+
+**优势**：切分点与语义边界对齐，chunk 内部语义连贯。
+
+**劣势**：需要对每个句子计算 Embedding，计算成本较高；阈值 $\theta$ 需要调优。
+
+### 6.4 Recursive Chunking（递归分块）
+
+递归分块是 LangChain 等框架的默认策略，核心思想是**按文档结构的层级递归切分**：
+
+```
+分隔符优先级: "\n\n" (段落) > "\n" (换行) > ". " (句子) > " " (单词)
+```
+
+**算法**：
+1. 先尝试用最高优先级的分隔符（段落分隔）切分
+2. 如果得到的 chunk 仍然超过 `chunk_size`，用下一级分隔符继续切分
+3. 递归直到所有 chunk 都不超过 `chunk_size`
+
+```python
+def recursive_chunk(text: str, chunk_size: int = 512,
+                    separators: list[str] = None) -> list[str]:
+    """
+    递归分块: 按结构层级逐步细化
+
+    参数:
+        text: 输入文本
+        chunk_size: 最大chunk大小(字符数)
+        separators: 分隔符列表, 按优先级从高到低
+    返回:
+        分块后的文本列表
+    """
+    if separators is None:
+        separators = ["\n\n", "\n", ". ", " "]
+
+    # 如果文本已经足够短, 直接返回
+    if len(text) <= chunk_size:
+        return [text]
+
+    # 尝试用当前最高优先级的分隔符切分
+    for i, sep in enumerate(separators):
+        if sep in text:
+            parts = text.split(sep)
+            chunks = []
+            current = ""
+            for part in parts:
+                # 尝试合并
+                candidate = current + sep + part if current else part
+                if len(candidate) <= chunk_size:
+                    current = candidate
+                else:
+                    if current:
+                        chunks.append(current)
+                    # 如果单个part就超过chunk_size, 用下一级分隔符继续切分
+                    if len(part) > chunk_size:
+                        sub_chunks = recursive_chunk(part, chunk_size, separators[i+1:])
+                        chunks.extend(sub_chunks)
+                        current = ""
+                    else:
+                        current = part
+            if current:
+                chunks.append(current)
+            return chunks
+
+    # 所有分隔符都用完了, 强制按chunk_size切分
+    return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+```
+
+### 6.5 Chunk Size 对检索质量的影响
+
+Chunk size 是 RAG 系统中最关键的超参数之一。过大或过小都会损害检索和生成质量。
+
+**Chunk Size 与检索精度的关系**：
+
+| Chunk Size | 检索精度 | 上下文完整性 | 噪声比例 | 适用场景 |
+|-----------|---------|------------|---------|---------|
+| **128-256** tokens | 高 | 低 | 低 | 精确事实查找 |
+| **512** tokens | 中高 | 中 | 中 | 通用问答（推荐默认值） |
+| **1024** tokens | 中 | 高 | 中高 | 需要上下文推理的问答 |
+| **2048+** tokens | 低 | 很高 | 高 | 长文档理解、摘要任务 |
+
+**经验法则**：
+
+$$\text{最优 Chunk Size} \approx \text{平均答案长度} \times 2$$
+
+即 chunk 应该大约是答案长度的 2 倍——足够包含答案及其上下文，但不至于引入过多无关内容。
+
+**Chunk Size 调优实验设计**：
+
+1. 准备一组标注的 (query, ground_truth_doc) 测试集
+2. 分别用 128、256、512、1024、2048 的 chunk size 构建索引
+3. 对每个 chunk size 计算 Recall@5 和 Recall@10
+4. 绘制 chunk size vs recall 曲线，找到最优点
+
+```python
+def evaluate_chunk_sizes(documents: list[str], test_queries: list[dict],
+                         chunk_sizes: list[int] = [128, 256, 512, 1024, 2048]) -> dict:
+    """
+    评估不同chunk size对检索质量的影响
+
+    参数:
+        documents: 文档列表
+        test_queries: 测试查询, 每个包含question和ground_truth_doc_id
+        chunk_sizes: 待测试的chunk size列表
+    返回:
+        每个chunk size对应的评估指标
+    """
+    results = {}
+    for size in chunk_sizes:
+        # 1. 按当前chunk size分块
+        chunks = []
+        for doc in documents:
+            chunks.extend(fixed_size_chunk(doc, chunk_size=size, overlap=size // 4))
+
+        # 2. 构建索引(伪代码)
+        # index = build_vector_index(chunks, embedding_model)
+
+        # 3. 检索并计算指标
+        recall_at_5 = 0
+        recall_at_10 = 0
+        for query in test_queries:
+            # retrieved = index.search(query["question"], top_k=10)
+            # recall_at_5 += compute_recall(retrieved[:5], query["ground_truth"])
+            # recall_at_10 += compute_recall(retrieved[:10], query["ground_truth"])
+            pass
+
+        results[size] = {
+            "recall@5": recall_at_5 / len(test_queries),
+            "recall@10": recall_at_10 / len(test_queries),
+            "num_chunks": len(chunks),
+            "avg_chunk_length": sum(len(c) for c in chunks) / len(chunks)
+        }
+
+    return results
+```
+
+### 6.6 Parent-Child Chunking（父子分块）
+
+Parent-Child Chunking 是一种巧妙的"分离检索粒度与生成粒度"的策略：
+
+- **子 chunk（小粒度）**：用于检索（精确匹配查询）
+- **父 chunk（大粒度）**：用于生成（提供充分上下文）
+
+```mermaid
+graph TB
+    subgraph "Parent-Child 策略"
+        P1["父 Chunk (1024 tokens)<br/>'Transformer 架构由...<br/>Self-Attention 机制...<br/>FFN 层...'"]
+        P1 --> C1["子 Chunk 1 (256 tokens)<br/>'Transformer 架构由...'"]
+        P1 --> C2["子 Chunk 2 (256 tokens)<br/>'Self-Attention 机制...'"]
+        P1 --> C3["子 Chunk 3 (256 tokens)<br/>'FFN 层...'"]
+    end
+
+    Q["查询: 'Self-Attention 计算'"] --> C2
+    C2 -.->|"检索命中子chunk<br/>但返回父chunk"| P1
+    P1 --> LLM["LLM 使用完整<br/>父chunk生成回答"]
+
+    style Q fill:#e3f2fd
+    style C2 fill:#fff9c4
+    style P1 fill:#e8f5e9
+    style LLM fill:#e8f5e9
+```
+
+**工作流程**：
+1. 同时创建大（父）和小（子）两套 chunk
+2. 建立子 chunk 到父 chunk 的映射关系
+3. 检索时用小 chunk 进行精确匹配
+4. 命中后返回对应的大 chunk 给 LLM
+
+这种策略有效解决了"检索粒度"与"生成粒度"之间的矛盾。
+
+---
+
+## 7. GraphRAG：基于知识图谱的 RAG
+
+### 7.1 动机：全局问题的挑战
 
 传统向量 RAG 在处理"局部问题"时表现优秀（如"HNSW 的时间复杂度是多少？"），但在面对"全局问题"时力不从心。
 
@@ -658,7 +1225,7 @@ $$\text{RRF}_w(d) = \sum_{r \in R} w_r \cdot \frac{1}{k + \text{rank}_r(d)}$$
 
 向量检索是基于**局部相似度**的：每个 chunk 独立编码，检索时找到的是与查询最相似的片段。但全局问题需要**跨文档的归纳推理**，单个 chunk 无法回答这类问题。
 
-### 4.2 GraphRAG 架构总览
+### 7.2 GraphRAG 架构总览
 
 GraphRAG（由 Microsoft 提出）通过构建知识图谱来增强 RAG 的全局推理能力。
 
@@ -685,7 +1252,7 @@ graph TB
     style K fill:#e8f5e9
 ```
 
-### 4.3 实体与关系抽取
+### 7.3 实体与关系抽取
 
 GraphRAG 使用 LLM 从文本中抽取实体和关系，构建知识图谱。
 
@@ -723,7 +1290,7 @@ GraphRAG 使用 LLM 从文本中抽取实体和关系，构建知识图谱。
 - (Transformer, BERT, 是...的基础架构, 强)
 - (Transformer, RNN, 取代了, 强)
 
-### 4.4 社区发现：Leiden 算法
+### 7.4 社区发现：Leiden 算法
 
 在构建完知识图谱后，GraphRAG 使用**社区发现算法**将图中紧密相连的节点分为社区。这些社区通常对应着一个"主题"或"子话题"。
 
@@ -778,7 +1345,7 @@ graph TB
 - **中粒度**："深度学习中有哪些主流架构？"
 - **粗粒度**："AI 领域有哪些关键技术趋势？"
 
-### 4.5 社区摘要与答案合成
+### 7.5 社区摘要与答案合成
 
 **社区摘要**是 GraphRAG 回答全局问题的关键：为每个社区生成一段描述其核心主题的摘要。
 
@@ -815,7 +1382,7 @@ graph LR
     style A fill:#e8f5e9
 ```
 
-### 4.6 GraphRAG vs Vector RAG 对比
+### 7.6 GraphRAG vs Vector RAG 对比
 
 | 维度 | Vector RAG | GraphRAG |
 |------|-----------|----------|
@@ -836,9 +1403,147 @@ graph LR
 
 ---
 
-## 5. 三条技术线的 RAG 实践
+## 8. RAG 评估框架
 
-### 5.1 Google：REALM 与 RETRO
+RAG 系统的评估是一个独立且重要的话题。与传统 NLP 任务不同，RAG 系统需要同时评估**检索质量**和**生成质量**，以及两者之间的**协同效果**。
+
+### 8.1 RAGAS 评估框架
+
+RAGAS（Retrieval Augmented Generation Assessment）是目前最流行的 RAG 评估框架，提出了四个核心指标，覆盖了 RAG 系统的各个环节。
+
+```mermaid
+graph TB
+    subgraph "RAGAS 四维评估"
+        Q["用户查询"] --> R["检索结果<br/>(Context)"]
+        R --> A["生成回答<br/>(Answer)"]
+        GT["Ground Truth<br/>(参考答案)"]
+
+        R --> CP["Context Precision<br/>上下文精确度"]
+        R --> CR["Context Recall<br/>上下文召回率"]
+        A --> F["Faithfulness<br/>忠实度"]
+        A --> AR["Answer Relevancy<br/>答案相关性"]
+
+        GT -.-> CR
+        GT -.-> AR
+    end
+
+    style CP fill:#e3f2fd
+    style CR fill:#e3f2fd
+    style F fill:#fff3e0
+    style AR fill:#fff3e0
+```
+
+#### Faithfulness（忠实度）
+
+**定义**：生成的回答中每个事实性声明是否都能在检索到的上下文中找到支持。
+
+$$\text{Faithfulness} = \frac{|\text{有上下文支持的声明}|}{|\text{回答中所有事实性声明}|}$$
+
+**计算步骤**：
+1. 用 LLM 将回答拆分为独立的事实性声明（claims）
+2. 对每个声明，判断是否能从检索到的上下文中推导出来
+3. 计算有支持的声明占比
+
+**示例**：
+
+```
+上下文: "HNSW 算法的搜索时间复杂度为 O(log N), 由 Malkov 等人于 2018 年提出。"
+回答: "HNSW 是一种高效的近似最近邻算法, 时间复杂度为 O(log N),
+      被广泛用于 Faiss 和 Milvus 等向量数据库中。"
+
+声明拆分:
+1. "HNSW 是近似最近邻算法" -> 上下文支持 (可推导) ✓
+2. "时间复杂度为 O(log N)" -> 上下文支持 ✓
+3. "被 Faiss 和 Milvus 使用" -> 上下文未提及 ✗
+
+Faithfulness = 2/3 = 0.667
+```
+
+**Faithfulness 低意味着什么？** 模型在"编造"检索上下文中不存在的信息（幻觉）。
+
+#### Answer Relevancy（答案相关性）
+
+**定义**：生成的回答是否与用户查询相关。
+
+**计算方法**：用 LLM 从回答中生成 $n$ 个"可能的原始问题"，然后计算这些问题与真实查询的平均相似度：
+
+$$\text{Answer Relevancy} = \frac{1}{n} \sum_{i=1}^{n} \text{sim}(E(q), E(\hat{q}_i))$$
+
+其中 $\hat{q}_i$ 是从回答反推出的第 $i$ 个问题，$E(\cdot)$ 是 Embedding 函数。
+
+**直觉**：如果回答切题，那么从回答反推出的问题应该与原始问题高度相似。
+
+#### Context Precision（上下文精确度）
+
+**定义**：检索到的上下文中，与回答相关的内容占比。
+
+$$\text{Context Precision} = \frac{1}{K} \sum_{k=1}^{K} \frac{\text{Precision@k} \times \text{rel}(k)}{\sum_{i=1}^{k} \text{rel}(i)}$$
+
+其中 $\text{rel}(k)$ 表示第 $k$ 个检索结果是否相关（0 或 1）。
+
+**Context Precision 低意味着什么？** 检索到了太多不相关的文档，浪费了 LLM 的上下文窗口。
+
+#### Context Recall（上下文召回率）
+
+**定义**：参考答案中的信息是否都能在检索到的上下文中找到。
+
+$$\text{Context Recall} = \frac{|\text{能从上下文推导的参考答案句子}|}{|\text{参考答案中所有句子}|}$$
+
+**Context Recall 低意味着什么？** 检索遗漏了关键信息，导致 LLM 没有足够的依据生成正确回答。
+
+### 8.2 其他评估指标
+
+除了 RAGAS 的四个核心指标外，工业实践中还常用以下评估方法：
+
+#### 检索阶段指标
+
+| 指标 | 公式 | 含义 |
+|------|------|------|
+| **Recall@K** | $\frac{\|\text{Top-K} \cap \text{Relevant}\|}{\|\text{Relevant}\|}$ | Top-K 中包含了多少相关文档 |
+| **MRR** | $\frac{1}{\|Q\|}\sum_{i=1}^{\|Q\|} \frac{1}{\text{rank}_i}$ | 第一个相关文档的平均排名倒数 |
+| **NDCG@K** | $\frac{\text{DCG@K}}{\text{IDCG@K}}$ | 归一化折损累积增益，考虑排序质量 |
+| **MAP** | $\frac{1}{\|Q\|}\sum_{q} \text{AvgPrec}(q)$ | 平均精度均值 |
+
+#### 生成阶段指标
+
+| 指标 | 方法 | 适用场景 |
+|------|------|---------|
+| **LLM-as-Judge** | 用 GPT-4 等强模型评分 | 开放式问答 |
+| **BLEU/ROUGE** | n-gram 重合度 | 有标准答案的摘要/翻译 |
+| **人工评估** | 标注员打分 | 金标准，但成本高 |
+| **A/B Test** | 线上对比实验 | 最终产品质量验证 |
+
+### 8.3 端到端评估实践
+
+一个完整的 RAG 评估流程应该覆盖以下步骤：
+
+```mermaid
+graph LR
+    D["构建评估数据集<br/>(query + ground_truth<br/>+ relevant_docs)"] --> R["运行 RAG Pipeline"]
+    R --> M1["计算检索指标<br/>(Recall/MRR/NDCG)"]
+    R --> M2["计算 RAGAS 指标<br/>(4维度)"]
+    R --> M3["LLM-as-Judge<br/>评分"]
+    M1 --> A["综合分析"]
+    M2 --> A
+    M3 --> A
+    A --> O["优化方向决策"]
+
+    style D fill:#e3f2fd
+    style O fill:#e8f5e9
+```
+
+**评估数据集构建建议**：
+
+1. **规模**：至少 50-100 个 query-answer 对（统计显著性）
+2. **覆盖度**：包含简单事实问题、复杂推理问题、全局归纳问题
+3. **难度梯度**：包含"简单检索即可回答"到"需要跨文档推理"的问题
+4. **边界案例**：包含知识库中不存在答案的问题（测试模型是否会编造）
+
+---
+
+## 9. 三条技术线的 RAG 实践
+
+### 9.1 Google：REALM 与 RETRO
 
 #### REALM：检索增强预训练
 
@@ -882,7 +1587,7 @@ $$h_l = \text{Attn}(h_{l-1}) + \text{CrossAttn}(h_{l-1}, E(z))$$
 - RETRO 7B 可以匹配标准 25B 模型的性能
 - 检索库可以在不重训模型的情况下更新
 
-### 5.2 DeepSeek：R1 + Search 场景应用
+### 9.2 DeepSeek：R1 + Search 场景应用
 
 DeepSeek 在推理增强模型（R1 系列）中探索了检索与推理的结合。
 
@@ -910,7 +1615,7 @@ graph TB
     style G fill:#e8f5e9
 ```
 
-### 5.3 Anthropic：RAG 安全视角
+### 9.3 Anthropic：RAG 安全视角
 
 > 注：Anthropic 关于 RAG 的具体技术实现细节公开信息有限。以下内容基于其公开的安全研究和技术博客，推测性内容已明确标注。
 
@@ -939,7 +1644,7 @@ Anthropic 在其技术文档中强调了模型是否"忠实于检索到的上下
 
 ---
 
-## 6. 项目实践
+## 10. 项目实践
 
 ### 项目 1：构建一个混合检索（Hybrid Search）系统（进阶 ）
 
@@ -1220,16 +1925,192 @@ graph TB
 
 ---
 
-## 7. 本章小结
+### 项目 5：RAG 检索策略对比实验（进阶 ）
+
+**目标**：通过系统实验，量化分析不同 chunk 大小和检索方法对 RAG 问答质量的影响，培养 RAG 系统调优的工程直觉。
+
+**任务**：
+
+1. 准备一个中文知识库（10-20 篇文档，涵盖某一技术领域，如深度学习基础知识）
+2. 手动标注 30+ 个 (question, ground_truth_answer, source_doc) 测试用例
+3. 实现三种 chunk 策略：Fixed-size（256/512/1024）、Recursive、Semantic
+4. 实现三种检索方法：纯 BM25、纯 Dense（使用开源 Embedding 模型）、Hybrid（RRF 融合）
+5. 交叉组合（3 chunk 策略 x 3 检索方法 = 9 组实验），计算 Recall@5、MRR、Faithfulness
+6. 分析实验结果，给出最优配置建议
+
+**提供的实验框架代码**：
+
+```python
+import itertools
+from dataclasses import dataclass
+from typing import Callable
+
+@dataclass
+class ExperimentConfig:
+    """实验配置"""
+    chunk_strategy: str      # "fixed_256", "fixed_512", "fixed_1024", "recursive", "semantic"
+    retrieval_method: str    # "bm25", "dense", "hybrid"
+    top_k: int = 5           # 检索返回数量
+    rrf_k: int = 60          # RRF 平滑参数(仅hybrid使用)
+
+@dataclass
+class ExperimentResult:
+    """实验结果"""
+    config: ExperimentConfig
+    recall_at_5: float
+    mrr: float
+    avg_num_chunks: int       # 该配置下的平均chunk数
+    avg_chunk_length: float   # 该配置下的平均chunk长度(token)
+    faithfulness: float       # RAGAS忠实度(需要LLM评估)
+    latency_ms: float         # 平均检索延迟(毫秒)
+
+
+def run_experiment(config: ExperimentConfig,
+                   documents: list[str],
+                   test_cases: list[dict],
+                   embedding_model,
+                   llm_client) -> ExperimentResult:
+    """
+    运行单组实验
+
+    参数:
+        config: 实验配置
+        documents: 原始文档列表
+        test_cases: 测试用例, 每个包含 question, answer, source_doc_id
+        embedding_model: 用于Dense检索的Embedding模型
+        llm_client: 用于生成和评估的LLM
+    返回:
+        实验结果
+    """
+    import time
+
+    # 1. 按配置分块
+    if config.chunk_strategy.startswith("fixed_"):
+        chunk_size = int(config.chunk_strategy.split("_")[1])
+        chunks = []
+        chunk_doc_map = {}  # chunk_id -> doc_id 的映射
+        for doc_id, doc in enumerate(documents):
+            doc_chunks = fixed_size_chunk(doc, chunk_size=chunk_size, overlap=chunk_size // 4)
+            for c in doc_chunks:
+                chunk_doc_map[len(chunks)] = doc_id
+                chunks.append(c)
+    elif config.chunk_strategy == "recursive":
+        # 使用递归分块(参考6.4节实现)
+        chunks, chunk_doc_map = [], {}
+        for doc_id, doc in enumerate(documents):
+            doc_chunks = recursive_chunk(doc, chunk_size=512)
+            for c in doc_chunks:
+                chunk_doc_map[len(chunks)] = doc_id
+                chunks.append(c)
+    # semantic 分块类似处理...
+
+    # 2. 构建索引(根据检索方法)
+    # ... 构建BM25索引、Dense索引 或 两者都构建
+
+    # 3. 对每个测试用例执行检索
+    recall_scores = []
+    mrr_scores = []
+    latencies = []
+
+    for case in test_cases:
+        start = time.time()
+        # retrieved_chunk_ids = retrieve(case["question"], config)
+        elapsed = (time.time() - start) * 1000
+        latencies.append(elapsed)
+
+        # 计算Recall: 检索到的chunk是否包含来自正确文档的chunk
+        # relevant_found = any(chunk_doc_map[cid] == case["source_doc_id"]
+        #                      for cid in retrieved_chunk_ids[:5])
+        # recall_scores.append(1.0 if relevant_found else 0.0)
+
+        # 计算MRR: 第一个正确chunk的排名倒数
+        # for rank, cid in enumerate(retrieved_chunk_ids, 1):
+        #     if chunk_doc_map[cid] == case["source_doc_id"]:
+        #         mrr_scores.append(1.0 / rank)
+        #         break
+        # else:
+        #     mrr_scores.append(0.0)
+
+    # 4. 计算Faithfulness(使用LLM评估)
+    # faithfulness_score = compute_faithfulness(test_cases, retrieved_contexts, llm_client)
+
+    return ExperimentResult(
+        config=config,
+        recall_at_5=sum(recall_scores) / len(recall_scores) if recall_scores else 0,
+        mrr=sum(mrr_scores) / len(mrr_scores) if mrr_scores else 0,
+        avg_num_chunks=len(chunks),
+        avg_chunk_length=sum(len(c) for c in chunks) / len(chunks),
+        faithfulness=0.0,  # 需要LLM评估
+        latency_ms=sum(latencies) / len(latencies) if latencies else 0
+    )
+
+
+def run_full_experiment_suite(documents, test_cases, embedding_model, llm_client):
+    """
+    运行完整的交叉实验
+
+    遍历所有chunk策略和检索方法的组合, 输出对比结果表
+    """
+    chunk_strategies = ["fixed_256", "fixed_512", "fixed_1024", "recursive", "semantic"]
+    retrieval_methods = ["bm25", "dense", "hybrid"]
+
+    results = []
+    for chunk_strat, ret_method in itertools.product(chunk_strategies, retrieval_methods):
+        config = ExperimentConfig(
+            chunk_strategy=chunk_strat,
+            retrieval_method=ret_method
+        )
+        print(f"运行实验: {chunk_strat} + {ret_method}")
+        result = run_experiment(config, documents, test_cases, embedding_model, llm_client)
+        results.append(result)
+
+    # 输出结果对比表
+    print("\n===== 实验结果汇总 =====")
+    print(f"{'Chunk策略':<15} {'检索方法':<10} {'Recall@5':<10} {'MRR':<10} "
+          f"{'Chunks数':<10} {'Faithfulness':<12} {'延迟(ms)':<10}")
+    print("-" * 77)
+    for r in sorted(results, key=lambda x: x.recall_at_5, reverse=True):
+        print(f"{r.config.chunk_strategy:<15} {r.config.retrieval_method:<10} "
+              f"{r.recall_at_5:<10.3f} {r.mrr:<10.3f} {r.avg_num_chunks:<10} "
+              f"{r.faithfulness:<12.3f} {r.latency_ms:<10.1f}")
+
+    return results
+```
+
+**实验设计建议**：
+
+1. **数据集**：选择一个技术领域（如"深度学习基础"），收集 10-20 篇相关博客或文档
+2. **测试用例类别**：
+   - **简单事实题**（10题）：如"HNSW 算法的时间复杂度是多少？"
+   - **需上下文推理题**（10题）：如"为什么 BM25 需要文档长度归一化？"
+   - **跨文档题**（5题）：如"对比 BM25 和 Dense Retrieval 的优缺点"
+   - **知识库外题**（5题）：如"2026年最新的 Embedding 模型排名"（答案不在库中）
+3. **评估重点**：
+   - 哪种 chunk 策略在不同类型问题上表现最好？
+   - Hybrid 检索相比单路检索提升多大？
+   - chunk size 与检索延迟的关系
+
+**可视化建议**：
+- 绘制 chunk size vs Recall@5 曲线（固定检索方法）
+- 绘制 3 种检索方法在不同问题类别上的 Recall 柱状图
+- 绘制 Recall-Latency 散点图（每个点是一组实验配置）
+
+---
+
+## 11. 本章小结
 
 ### 核心知识点
 
 1. **RAG 数学范式**：$P(y|x) \approx \sum_{z \in \text{TopK}} P(y|x,z) \cdot P(z|x)$，将知识从"参数记忆"转变为"外部检索"
-2. **Naive vs Advanced RAG**：Query 重写、HyDE、Reranking 等优化策略显著提升检索质量
-3. **双塔检索**：Bi-Encoder 通过 InfoNCE 对比学习训练，实现高效的向量匹配
-4. **HNSW**：分层导航小世界图，$O(\log N)$ 的搜索复杂度，是工业界最流行的 ANN 算法
-5. **BM25 与混合搜索**：稀疏检索的精确匹配与稠密检索的语义理解互补，RRF 融合两者
-6. **GraphRAG**：通过知识图谱和社区发现，解决全局问题的归纳推理难题
+2. **三代 RAG 架构演进**：Naive RAG → Advanced RAG → Modular RAG，从简单拼接到模块化编排
+3. **Naive vs Advanced RAG**：Query 重写、HyDE、Reranking 等优化策略显著提升检索质量
+4. **双塔检索**：Bi-Encoder 通过 InfoNCE 对比学习训练，实现高效的向量匹配
+5. **HNSW**：分层导航小世界图，$O(\log N)$ 的搜索复杂度，是工业界最流行的 ANN 算法
+6. **BM25 与混合搜索**：稀疏检索的精确匹配与稠密检索的语义理解互补，RRF 融合两者
+7. **检索策略选择**：Dense/Sparse/Hybrid 各有适用场景，条件路由可自适应选择最优策略
+8. **Chunk 策略**：Fixed-size/Semantic/Recursive/Parent-Child 四种策略，chunk size 是最关键的超参数
+9. **GraphRAG**：通过知识图谱和社区发现，解决全局问题的归纳推理难题
+10. **RAGAS 评估**：Faithfulness、Answer Relevancy、Context Precision、Context Recall 四维评估体系
 
 ### 数学要点
 
@@ -1244,9 +2125,18 @@ graph TB
 1. 先 BM25 再向量搜索的 Hybrid 方案是工业界最常见的检索策略
 2. Reranking 能以较小的计算开销显著提升检索精度
 3. HyDE 特别适合"问题和答案语义差距大"的场景
-4. GraphRAG 的索引构建成本高（大量 LLM 调用），适合文档变化不频繁的场景
-5. 向量库选型需根据数据规模、延迟要求、部署环境综合考虑
-6. 完整代码见 `code/rag/` 目录
+4. Chunk size 的选择应基于实验验证，而非拍脑袋；512 tokens 是一个合理的起点
+5. Parent-Child Chunking 有效解决了"检索粒度"与"生成粒度"的矛盾
+6. RAGAS 提供了系统化的 RAG 评估方法，四个指标分别定位不同环节的问题
+7. GraphRAG 的索引构建成本高（大量 LLM 调用），适合文档变化不频繁的场景
+8. 向量库选型需根据数据规模、延迟要求、部署环境综合考虑
+9. 完整代码见 `code/rag/` 目录
+
+### 下一步：从 RAG 到 LLM 前沿全景
+
+至此，我们已经构建了完整的 LLM 知识体系：从分词（Module 1）到 Embedding（Module 2）、从 Transformer 架构（Module 3-5）到预训练与微调（Module 8-10）、从对齐（Module 11-12）到推理优化（Module 13-14），再到本章的 RAG 与知识增强。这条路径覆盖了"训练一个模型 → 让它有用 → 让它安全 → 让它高效 → 让它获取实时知识"的完整链路。
+
+在下一个也是最后一个模块（**Module 16：前沿专题与终极项目**）中，我们将纵览 LLM 领域最新的研究前沿——包括多模态大模型、Agent 系统、推理增强（o1/R1 范式）、模型合并等方向——并通过一个综合性的终极项目，将前 15 个模块的知识串联起来，构建一个完整的端到端 LLM 应用系统。
 
 ---
 
@@ -1265,6 +2155,8 @@ graph TB
 9. Asai et al. (2024). *Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection*.
 10. Robertson & Zaragoza (2009). *The Probabilistic Relevance Framework: BM25 and Beyond*.
 11. Cormack et al. (2009). *Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank Learning Methods*. (RRF)
+12. Es et al. (2024). *RAGAS: Automated Evaluation of Retrieval Augmented Generation*. (RAGAS 评估框架)
+13. Gao et al. (2024). *Retrieval-Augmented Generation for Large Language Models: A Survey*. (RAG 综述)
 
 ### 博客与资源
 
@@ -1272,3 +2164,5 @@ graph TB
 2. [Microsoft GraphRAG](https://github.com/microsoft/graphrag) - GraphRAG 官方实现
 3. [Faiss](https://github.com/facebookresearch/faiss) - Facebook 向量检索库
 4. [MTEB Leaderboard](https://huggingface.co/spaces/mteb/leaderboard) - Embedding 模型排行榜
+5. [RAGAS Documentation](https://docs.ragas.io/) - RAGAS 评估框架官方文档
+6. [Chunking Strategies](https://www.pinecone.io/learn/chunking-strategies/) - Pinecone 分块策略指南

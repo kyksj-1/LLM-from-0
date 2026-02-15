@@ -7,6 +7,7 @@
 ## 目录
 
 - [1. Google：从 PaLM 到 Gemma 的架构演进](#1-google从-palm-到-gemma-的架构演进)
+- [1.5 Meta: Llama 3 架构深度解析](#15-meta-llama-3-架构深度解析)
 - [2. DeepSeek：以效率为核心的架构选择](#2-deepseek以效率为核心的架构选择)
 - [3. Anthropic：安全约束下的架构设计](#3-anthropic安全约束下的架构设计)
 - [4. 前沿话题](#4-前沿话题)
@@ -107,6 +108,78 @@ Gemma 作为 Google 的开源系列，面临独特的设计约束：
 
 ---
 
+## 1.5 Meta: Llama 3 架构深度解析
+
+Llama 3 是 Meta 截至 2024 年最重要的开源模型发布，其技术报告（*The Llama 3 Herd of Models*）公开了大量架构和训练细节。本节深入分析其关键技术决策。
+
+### 1.5.1 128K 词汇表的选择理由与影响
+
+Llama 3 将词汇表从 32K 大幅扩展到 128K（使用 tiktoken 的 BPE 实现），这一决策有多方面考量：
+
+**选择理由**：
+- **多语言效率**：32K 词汇表以英语为主，非英语文本的 token 化效率低（同样的中文内容可能需要 2-3 倍的 token）。128K 词汇表分配了更多编码给高频非英语子词
+- **代码能力**：代码中常见的长标识符（如 `getAttributeValue`）在大词汇表下可以被编码为更少的 token
+- **推理效率**：同一段文本被编码为更少的 token 意味着更少的自回归生成步数，直接提升推理速度
+- **计算效率**：更少的 token 意味着更短的序列长度，注意力的 $O(n^2)$ 复杂度得到缓解
+
+**影响**：
+- **Embedding 参数量增加**：$128K \times 4096 = 524M$（对比 Llama 2 的 $32K \times 4096 = 131M$），增加了约 400M 参数
+- **LM Head 输出维度增大**：Softmax 计算量增加（但可通过 Flash Attention 的并行 Softmax 优化）
+- **权重共享的收益更大**：Embedding 和 LM Head 权重共享（tie weights）节省的参数量更显著
+
+### 1.5.2 Grouped Query Attention 的具体配置
+
+Llama 3 延续了 Llama 2 引入的 GQA 设计：
+
+| 模型规模 | Q 头数 | KV 头数 | GQA 比例 | KV Cache 压缩比 |
+|---------|--------|---------|---------|---------------|
+| 8B | 32 | 8 | 4:1 | 4x |
+| 70B | 64 | 8 | 8:1 | 8x |
+| 405B | 128 | 8 | 16:1 | 16x |
+
+**值得注意的设计选择**：
+- KV 头数固定为 8，不随模型规模变化。这意味着更大的模型获得更高的 KV Cache 压缩比
+- 405B 模型的 16:1 比例在不显著损失质量的前提下，将 KV Cache 压缩了 16 倍
+- 这一配置经过了大量消融实验验证，8 个 KV 头被认为是质量和效率的最佳平衡点
+
+### 1.5.3 训练数据 15T tokens 的规模分析
+
+Llama 3 8B 模型使用了 **15T+ tokens** 进行训练，这是一个极端的"过度训练"策略：
+
+- **Chinchilla 最优**：8B 参数对应约 160B tokens（按 20:1 数据-参数比）
+- **实际训练量**：15T tokens，约为 Chinchilla 最优的 **94 倍**
+- **训练成本权衡**：训练成本增加了约 94 倍，但推理时每个 query 使用的是更小、更快的 8B 模型
+
+$$\text{过度训练倍率} = \frac{D_{actual}}{D_{Chinchilla}} = \frac{15 \times 10^{12}}{20 \times 8 \times 10^9} \approx 94\times$$
+
+**为什么值得过度训练？**
+- 8B 模型的推理成本远低于 70B 模型（约 9 倍差距）
+- 如果通过过度训练使 8B 模型接近未过度训练的 70B 模型性能，则推理时的总成本节省是巨大的
+- Meta 拥有大量 GPU 资源，训练成本的边际增加可以接受
+
+### 1.5.4 Safety 训练流程
+
+Llama 3 的安全训练是一个多阶段流程：
+
+```mermaid
+graph TB
+    A["预训练<br/>(15T tokens, NTP)"] --> B["SFT<br/>(指令微调)"]
+    B --> C["Rejection Sampling<br/>(拒绝采样)"]
+    C --> D["DPO<br/>(直接偏好优化)"]
+    D --> E["安全评估<br/>(Red Teaming)"]
+    E -->|"发现问题"| F["安全数据增强"]
+    F --> C
+    E -->|"通过"| G["发布 Chat 版本"]
+```
+
+关键特征：
+- 使用 **DPO** 而非 PPO 进行偏好对齐（工程更简单，训练更稳定）
+- 多轮 **Rejection Sampling** 筛选高质量回复
+- 迭代式安全改进：Red Teaming 发现的问题被转化为新的训练数据
+- 系统级安全机制：Llama Guard（输入/输出分类器）+ Code Shield（代码安全检查）
+
+---
+
 ## 2. DeepSeek：以效率为核心的架构选择
 
 ### 2.1 DeepSeek-V1：基础架构验证
@@ -172,6 +245,72 @@ DeepSeek-V3 的一个显著特点是在 MoE 架构下实现了极致的效率：
 - 训练成本仅 $5.576M（使用 H800 集群）
 
 这种设计体现了 DeepSeek 的核心哲学：**不追求最大的模型，而是追求在给定计算预算下最优的性能**。
+
+### 2.5 从 Dense 到 MoE：DeepSeek 的架构演进路径
+
+DeepSeek 的架构演进展示了一条清晰的**效率驱动**路径：
+
+```mermaid
+graph TB
+    subgraph "DeepSeek 架构演进"
+        V1["V1: Dense 67B<br/>标准 Llama 风格<br/>验证数据质量的价值"] --> V2["V2: 236B MoE (21B 活跃)<br/>MLA + DeepSeekMoE<br/>推理成本大幅降低"]
+        V2 --> V3["V3: 671B MoE (37B 活跃)<br/>FP8 + DualPipe<br/>训练效率极致优化"]
+    end
+
+    style V1 fill:#e3f2fd
+    style V2 fill:#bbdefb
+    style V3 fill:#90caf9
+```
+
+**V1 → V2 的关键跨越（Dense → MoE）**：
+- DeepSeek-V1 证明了数据质量的重要性，但 Dense 67B 模型的推理成本仍然很高
+- V2 同时引入了两大创新：**MLA 压缩 KV Cache** 和 **MoE 稀疏激活**
+- 这使得 V2 的总参数量达到 236B（知识容量更大），但每个 token 只需 21B 参数的计算量（推理更快）
+- V2 的 API 定价因此可以远低于同性能的 Dense 模型
+
+### 2.6 DeepSeek-V2 的 MLA 简介
+
+MLA（Multi-head Latent Attention）是 DeepSeek-V2 的核心架构创新，详细数学推导将在模块 5 中展开。这里给出核心思想：
+
+**核心原理**：将 K 和 V 投影到一个低维"潜在空间"（latent space），只缓存压缩后的表示。
+
+$$c_{KV} = W_{DKV} \cdot x \in \mathbb{R}^{d_c}, \quad d_c \ll n_h \times d_h$$
+
+推理时从压缩表示中恢复 K 和 V：
+
+$$K = W_{UK} \cdot c_{KV}, \quad V = W_{UV} \cdot c_{KV}$$
+
+**RoPE 兼容性处理**：由于 RoPE 编码需要在注意力计算中保持位置信息，MLA 为 RoPE 相关的部分保留了独立的小维度 $d_r$（约 64 维），仅缓存这一小部分额外信息。
+
+**实际效果**：
+- 标准 MHA：每层每 token 缓存 $2 \times n_h \times d_h$ 个元素
+- MLA：每层每 token 缓存 $d_c + d_r$ 个元素
+- 以 V2 配置为例：$2 \times 128 \times 128 = 32768$ → $512 + 64 = 576$，压缩比约 **57 倍**
+
+### 2.7 DeepSeek-V3 的工程创新
+
+DeepSeek-V3 在 V2 的架构基础上，重点突破了**训练效率**：
+
+**FP8 混合精度训练**：
+- 将大部分矩阵乘法（GEMM）从 BF16 降级到 FP8（8-bit 浮点），理论吞吐量提升约 2 倍
+- 关键挑战：FP8 的动态范围有限（E4M3 格式只有 448 的最大值），需要精细的缩放策略
+- DeepSeek 采用了**逐 tile 缩放**：将矩阵分为小块，每块独立计算缩放因子，避免全局缩放的精度损失
+- 对训练稳定性的影响：需要在关键路径（如注意力的 Softmax、归一化层）保留 BF16/FP32 精度
+
+**显存优势**：
+- FP8 权重：每个参数 1 字节（对比 BF16 的 2 字节）
+- FP8 激活值：同样减半存储
+- 总显存需求约为 BF16 的 60-70%（部分层仍需高精度）
+
+**DualPipe 流水线并行**（详见模块 9）：
+- 传统流水线并行存在"气泡"——某些 GPU 在等待其他 GPU 完成计算
+- DualPipe 将前向和后向计算与通信操作重叠执行，几乎消除气泡
+- 实现了接近理论峰值的 GPU 利用率
+
+**辅助损失 free 的 MoE 路由**：
+- 传统 MoE 需要辅助损失来强制负载均衡，但这会干扰主损失的优化
+- V3 使用了一种基于 token 级动态调整的策略，在不引入额外损失项的情况下实现均衡
+- 这简化了超参数调优（不需要调辅助损失系数 $\alpha$）
 
 ---
 
@@ -351,12 +490,13 @@ graph TB
 1. Chowdhery et al. (2022). *PaLM: Scaling Language Modeling with Pathways*. Google.
 2. Anil et al. (2023). *Gemini: A Family of Highly Capable Multimodal Models*. Google.
 3. Team Gemma (2024). *Gemma 2: Improving Open Language Models at a Practical Size*. Google.
-4. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient MoE Language Model*.
-5. DeepSeek-AI (2024). *DeepSeek-V3 Technical Report*.
-6. Bai et al. (2022). *Constitutional AI: Harmlessness from AI Feedback*. Anthropic.
-7. Elhage et al. (2021). *A Mathematical Framework for Transformer Circuits*. Anthropic.
-8. Olsson et al. (2022). *In-context Learning and Induction Heads*. Anthropic.
-9. Gu & Dao (2023). *Mamba: Linear-Time Sequence Modeling with Selective State Spaces*.
+4. Grattafiori et al. (2024). *The Llama 3 Herd of Models*. Meta.
+5. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient MoE Language Model*.
+6. DeepSeek-AI (2024). *DeepSeek-V3 Technical Report*.
+7. Bai et al. (2022). *Constitutional AI: Harmlessness from AI Feedback*. Anthropic.
+8. Elhage et al. (2021). *A Mathematical Framework for Transformer Circuits*. Anthropic.
+9. Olsson et al. (2022). *In-context Learning and Induction Heads*. Anthropic.
+10. Gu & Dao (2023). *Mamba: Linear-Time Sequence Modeling with Selective State Spaces*.
 10. Peng et al. (2023). *RWKV: Reinventing RNNs for the Transformer Era*.
 11. De et al. (2024). *Griffin: Mixing Gated Linear Recurrences with Local Attention for Efficient Language Models*. Google.
 12. Lieber et al. (2024). *Jamba: A Hybrid Transformer-Mamba Language Model*. AI21 Labs.

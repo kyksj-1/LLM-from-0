@@ -399,6 +399,60 @@ Phi 系列模型（1.3B, 2.7B）通过使用极高质量的"教科书级"合成�
 3. Scaling Laws 的理论基础将进一步完善
 4. 专门领域（如科学、医学）的 Scaling Laws 将被独立研究
 
+### 4.6 Scaling Law 的数学推导：为什么是幂律？
+
+Scaling Laws 呈现为幂律（power law）这一事实本身就值得深入追问：**为什么是幂律而不是指数衰减、对数衰减或其他函数形式？**
+
+#### Kaplan 幂律关系的推导思路
+
+Kaplan et al. (2020) 的幂律发现主要是经验性的，但后续的理论工作提供了一些解释。
+
+**基于偏差-方差分解的推导**：
+
+考虑一个模型在数据上的期望损失可以分解为：
+
+$$L = \underbrace{L_\infty}_{\text{不可约误差}} + \underbrace{L_{\text{bias}}(N)}_{\text{模型偏差}} + \underbrace{L_{\text{var}}(D)}_{\text{估计方差}}$$
+
+- **不可约误差** $L_\infty$：数据本身的固有噪声，即使完美模型也无法消除
+- **模型偏差** $L_{\text{bias}}(N)$：有限参数量导致的表达力不足
+- **估计方差** $L_{\text{var}}(D)$：有限数据导致的参数估计不确定性
+
+在统计学习理论中，对于光滑函数类，bias 项通常以幂律衰减：
+
+$$L_{\text{bias}}(N) \propto N^{-\alpha}$$
+
+其中 $\alpha$ 与数据流形的内在维度 $d_{\text{data}}$ 有关。类似地，variance 项：
+
+$$L_{\text{var}}(D) \propto D^{-\beta}$$
+
+将两者相加，就得到了 Chinchilla 损失模型的形式：
+
+$$L(N, D) = \frac{A}{N^{\alpha}} + \frac{B}{D^{\beta}} + L_\infty$$
+
+**为什么不是指数衰减？** 指数衰减（$L \propto e^{-cN}$）意味着每增加固定数量的参数，loss 减半——这在物理上不太合理，因为"容易学"的模式总是先被学到，后续的参数主要用于捕捉越来越精细的模式，边际收益递减。幂律恰好描述了这种"越来越难"的递减规律。
+
+#### 与统计学习理论的联系
+
+经典统计学习理论中的"学习曲线"（learning curve）描述了测试误差如何随样本量 $n$ 下降。对于光滑函数类和核方法：
+
+$$\text{Excess Risk} \propto n^{-\frac{2s}{2s + d}}$$
+
+其中 $s$ 是函数的光滑度，$d$ 是输入维度。这个结果与 Scaling Laws 的形式一致——都是幂律，且指数由数据的内在复杂度决定。
+
+**Sharma & Kaplan (2022)** 将这一联系具体化，提出：
+
+$$\alpha \approx \frac{d_{\text{model}}}{2d_{\text{model}} + d_{\text{data}}}$$
+
+其中 $d_{\text{model}}$ 是模型的有效维度，$d_{\text{data}}$ 是数据流形的内在维度。这个公式的直觉是：数据越复杂（$d_{\text{data}}$ 越大），Scaling 越慢（$\alpha$ 越小），需要更多参数才能获得相同的改善。
+
+#### 未完成的理论挑战
+
+尽管上述分析提供了部分解释，Scaling Laws 的完整理论推导仍然是一个开放问题：
+
+1. **幂律指数的精确预测**：目前还不能从数据和架构的第一性原理推导出 $\alpha \approx 0.34$, $\beta \approx 0.28$ 这些具体值
+2. **可加性假设的合理性**：$L = A/N^\alpha + B/D^\beta + E$ 假设模型不足和数据不足的贡献是可加的，但实际上两者可能存在交互作用
+3. **架构依赖性**：不同架构（Transformer vs RNN vs State Space Model）是否有不同的 Scaling 指数？初步实验表明差异很小，但原因不明
+
 ---
 
 ## 延伸阅读
