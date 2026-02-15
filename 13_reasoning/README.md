@@ -1,5 +1,24 @@
 # 模块13：CoT与推理 — 思维链与测试时计算
 
+## 章节定位
+
+```mermaid
+graph LR
+    A["模块 12<br/>DPO 直接偏好优化"] --> B["**模块 13**<br/>**CoT 与推理**"]
+    B --> C["模块 14<br/>推理加速与部署"]
+
+    style A fill:#e3f2fd
+    style B fill:#ff8f00,color:#fff
+    style C fill:#e3f2fd
+```
+
+**推理能力的意义**：前面的模块讲解了如何训练和对齐 LLM，但这些模型本质上仍是"知识检索器"——它们擅长回忆和复述训练数据中的知识，却难以解决需要多步推理的复杂问题。本模块标志着 LLM 能力的关键跃迁：**从"知道什么"到"能推理什么"**。Chain-of-Thought、Self-Consistency、Test-time Compute Scaling 和推理模型（DeepSeek-R1、OpenAI o1/o3）等技术，让 LLM 具备了真正的"思考"能力——分解问题、逐步推导、自我检验、回溯修正。
+
+**前置知识**：
+- **RLHF/DPO（模块 11-12）**：推理模型的训练高度依赖强化学习（如 DeepSeek-R1 使用 GRPO），理解 RL 基础和偏好优化是理解本章训练方法的前提
+- **Transformer 架构（模块 3-5）**：理解自回归生成和注意力机制，有助于理解为什么 CoT 能增加有效计算深度
+- **Scaling Laws（模块 8）**：本章将引入"测试时 Scaling Law"这一全新维度，与训练时 Scaling Law 形成互补
+
 > 推理是智能的核心。本章将从 Chain-of-Thought Prompting 出发，系统讲解 LLM 的推理增强技术：从 Few-shot CoT 到 Self-Consistency，从 Tree of Thoughts 到 Test-time Compute Scaling，再到 DeepSeek-R1 等推理模型的训练方法。我们还将深入推理评估基准，理解如何衡量模型的推理能力。
 
 ---
@@ -513,6 +532,87 @@ graph LR
     style A fill:#e8f5e9
 ```
 
+### 3.5 Best-of-N 的数学深入分析
+
+Best-of-N 策略的效果可以通过更精细的概率分析来理解。
+
+**基本模型**：假设模型对某道题的单次正确率为 $p$，且每次采样独立。则 $N$ 次采样中至少有一个正确答案的概率为：
+
+$$P(\text{至少一个正确}) = 1 - (1-p)^N$$
+
+**收益递减分析**：对 $N$ 求导可以看出边际收益递减的规律：
+
+$$\frac{\partial P}{\partial N} = -(1-p)^N \ln(1-p)$$
+
+当 $N$ 增大时，$(1-p)^N$ 指数衰减，因此每增加一次采样的边际收益也在衰减。
+
+**具体数值示例**：
+
+| $N$ | $p=0.1$ | $p=0.3$ | $p=0.5$ |
+|-----|---------|---------|---------|
+| 1 | 10.0% | 30.0% | 50.0% |
+| 4 | 34.4% | 76.0% | 93.8% |
+| 8 | 57.0% | 94.2% | 99.6% |
+| 16 | 81.5% | 99.7% | ~100% |
+| 32 | 96.6% | ~100% | ~100% |
+
+**关键洞察**：当 $p$ 很低时（模型能力弱），即使 $N$ 很大也需要 Verifier 足够准确才有效；当 $p$ 已经较高时，少量采样就能接近 100%。**Best-of-N 放大的是模型已有的能力，而非凭空创造新能力**。
+
+### 3.6 多数投票（Majority Voting）的深入分析
+
+**多数投票与 Self-Consistency 的关系**：Self-Consistency（第 2.1 节）本质上就是一种多数投票策略。其核心假设是：正确的推理路径更容易"收敛"到同一答案。
+
+**简单投票 vs 加权投票**：
+
+| 策略 | 公式 | 优势 | 劣势 |
+|------|------|------|------|
+| 简单投票 | $\hat{a} = \arg\max_a \sum_i \mathbf{1}[a_i = a]$ | 简单、无需额外模型 | 忽略了推理路径的质量差异 |
+| 加权投票 | $\hat{a} = \arg\max_a \sum_i w_i \cdot \mathbf{1}[a_i = a]$ | 考虑路径质量 | 需要验证器提供权重 |
+
+**加权投票的权重来源**：
+- **生成概率加权**：$w_i = P_\theta(r_i, a_i \mid q)$，即推理路径的对数概率
+- **验证器分数加权**：$w_i = V(q, r_i, a_i)$，用 ORM 或 PRM 打分
+- **混合加权**：$w_i = P_\theta(r_i, a_i \mid q)^\alpha \cdot V(q, r_i, a_i)^\beta$
+
+**实践建议**：在没有验证器的情况下，简单多数投票已经是一个非常强的基线。Lightman et al. (2023) 发现，只有当 PRM 质量足够高时，加权投票才能显著超越简单投票。
+
+### 3.7 Compute-Optimal Scaling：推理计算预算的最优分配
+
+给定固定的推理计算预算 $C$，存在三种基本的分配方式：
+
+```mermaid
+graph TB
+    Budget["推理计算预算 C"] --> S1["策略1: 多采样<br/>N个短回答<br/>(Best-of-N / 投票)"]
+    Budget --> S2["策略2: 更长推理链<br/>1个深度思考的长回答"]
+    Budget --> S3["策略3: 更大模型<br/>用更强的模型生成1个回答"]
+
+    S1 --> R1["适合: 中等难度问题<br/>多条路径增加覆盖"]
+    S2 --> R2["适合: 高难度问题<br/>需要深度推理"]
+    S3 --> R3["适合: 基础能力不足时<br/>单次质量决定上限"]
+
+    style Budget fill:#e3f2fd
+    style R1 fill:#c8e6c9
+    style R2 fill:#fff3e0
+    style R3 fill:#f3e5f5
+```
+
+**Snell et al. (2024) 的核心发现**：
+
+在某些任务上，**小模型 + 大量推理计算 > 大模型 + 少量推理计算**。例如：
+- Llama-3-8B + Best-of-256 在 MATH 上的表现 ≈ Llama-3-70B + Greedy decoding
+- 这意味着推理计算可以在一定程度上"弥补"模型参数的不足
+
+但这并非无条件成立：
+- 当问题难度超出小模型的能力范围时（即 $p \approx 0$），再多采样也无济于事
+- 存在一个"能力阈值"：只有当模型对某类问题有非零的正确率时，Test-time Compute 才有效
+
+**最优分配的实用经验法则**：
+
+1. 先评估模型在目标任务上的基础正确率 $p$
+2. 若 $p > 0.1$：Best-of-N 或投票是高性价比的选择
+3. 若 $p < 0.05$：优先考虑使用更强的模型，或通过 few-shot 提升基础能力
+4. 在 $p$ 中等（0.1-0.5）时，测试时计算的边际收益最大
+
 ---
 
 ## 4. 推理模型
@@ -863,6 +963,78 @@ graph LR
 - **Unfaithful CoT**：模型的推理过程是"编造"的，与实际决策过程不一致
 - Anthropic 的研究表明，模型可能会为已确定的答案"合理化"推理过程 [推测]
 
+### 6.4 推理模型的工业实践深度分析
+
+上面的小节简要概述了三条技术线的推理方向。本小节从工程和实践角度对目前最具影响力的推理模型进行更深入的分析。
+
+#### OpenAI o1/o3 系列（基于公开信息）
+
+OpenAI 的 o1（2024 年 9 月发布）和 o3（2024 年底预告）系列是商业推理模型的先驱。
+
+**隐式思维链（Internal Chain-of-Thought）**：
+- 与 DeepSeek-R1 不同，o1 的推理过程对用户**不可见**——模型在输出最终答案前进行内部"思考"，但这些思考 token 被隐藏
+- 用户只能看到最终答案和一段概括性的推理摘要
+- 这种设计的权衡：保护了推理策略的商业机密，但降低了可解释性和可审计性
+
+**推理 token 消耗与性能的关系**：
+- o1 的核心机制是：更长的内部推理链 = 更多推理 token = 更高的回答质量
+- 这在 API 计费中直接体现——推理 token 会被计入输出 token 费用
+- o1-mini 消耗的推理 token 少于 o1-full，性能也相应降低
+
+**突破性表现**：
+
+| 基准 | GPT-4o | o1-mini | o1 |
+|------|--------|---------|-----|
+| MATH | ~76% | ~90% | **94.8%** |
+| GPQA Diamond | ~53% | ~60% | **78.0%** |
+| Codeforces Rating | ~800 | ~1650 | **1891** |
+| 2024 AIME | ~12% | ~57% | **83.3%** (con@64) |
+
+o1 在数学、代码、科学推理上的表现标志着 LLM 从"能说会道"到"能思考会推理"的质变。
+
+#### DeepSeek-R1 的工程实践细节
+
+在第 4 节已经介绍了 R1 的训练方法。这里补充其工程落地方面的关键细节：
+
+**R1-Zero 的"Aha Moment"的完整故事**：
+
+R1-Zero 的实验是整个 R1 项目中最令人兴奋的发现。在未经过任何 SFT 的情况下，纯 RL 训练产生了以下自发行为的涌现顺序：
+
+```
+训练初期 → 简短无序输出
+     ↓
+训练中期 → 开始出现步骤化推理
+     ↓
+"Aha Moment" → 出现 "Wait, let me reconsider..." 自我反思
+     ↓
+训练后期 → 稳定的多步推理 + 自我检查 + 回溯修正
+```
+
+这一涌现过程证明了一个深刻的观点：**推理能力可以仅通过奖励信号（答案正确性）自然涌现，不需要显式教模型"如何推理"**。
+
+**完整训练流程的工程决策**：
+
+| 阶段 | 关键工程决策 | 决策理由 |
+|------|------------|----------|
+| 冷启动 SFT | 使用数千条（非数万条）数据 | 太多会让模型"记忆"推理模式而非学习推理 |
+| 推理 RL | 仅用规则奖励，不用奖励模型 | 避免 reward hacking，数学/代码答案可精确验证 |
+| 拒绝采样 + SFT | 从基础模型重新 SFT | 避免 RL 阶段损害的通用能力被固化 |
+| 全场景 RL | 推理+通用任务同时训练 | 多任务 RL 防止能力退化 |
+
+**蒸馏的关键经验**：
+- R1-Distill 系列证明了一个违反直觉的结论：**SFT 蒸馏 > 小模型直接 RL**
+- 7B 蒸馏模型在 AIME 2024 上达到 55.5%，而 7B 直接 RL 仅约 30%
+- 原因：小模型的探索空间有限，RL 难以发现高质量的推理策略；而大模型已经"探索"过了，蒸馏相当于直接传授最优策略
+
+#### Google 的推理路线补充
+
+**Chain-of-Thought 的发源地**：CoT Prompting（Wei et al., 2022）的核心作者来自 Google Brain，这项技术最早在 PaLM 540B 上验证。Google 在推理提示技术的学术贡献是开创性的。
+
+**Gemini 的推理差异化**：
+- Gemini 2.0 Flash Thinking 引入的"思考模式"类似 o1 的思维链，但 Google 选择了**部分可见**的方式——用户可以看到模型的思考摘要
+- Gemini 的独特优势在于**多模态推理**：能直接对图表、数学公式图片进行推理，而非仅处理文本
+- 与 Google Search 的深度集成使 Gemini 成为当前最接近 ReAct 框架在生产环境落地的实践
+
 ---
 
 ## 7. 项目实践
@@ -1106,6 +1278,89 @@ Function verify(question, response):
 
 ---
 
+### 项目 5：Test-Time Compute Scaling 实验 (⭐⭐ 进阶)
+
+**目标**：通过实验验证 Best-of-N 和 Majority Voting 在数学推理上的效果，理解测试时计算的 Scaling 行为。
+
+**实验设计**：
+
+1. 选取 GSM8K 的一个子集（50-100 道题）作为测试集
+2. 用 LLM 对每道题生成 $N$ 个回答（$N = 1, 4, 8, 16, 32$）
+3. 分别用三种策略评估：
+   - **Random**：随机选择一个回答
+   - **Majority Voting**：多数投票选择答案
+   - **Best-of-N (Oracle)**：用标准答案作为"完美验证器"，检查 $N$ 个回答中是否有正确的
+4. 画出 $N$ vs 准确率曲线，观察收益递减效应
+
+**伪代码**：
+
+```python
+import collections
+import numpy as np
+
+def test_time_scaling_experiment(questions, model, n_values=[1, 4, 8, 16, 32],
+                                 temperature=0.7, max_samples=32):
+    """
+    Test-Time Compute Scaling 实验
+
+    Args:
+        questions: 数学题列表，每道题包含 'question' 和 'answer' 字段
+        model: LLM 模型（需要支持温度采样）
+        n_values: 要测试的 N 值列表
+        temperature: 采样温度
+        max_samples: 每道题的最大采样数（生成一次，复用于不同 N）
+    """
+    results = {n: {"random": [], "majority": [], "oracle": []} for n in n_values}
+
+    for q in questions:
+        # 一次性采样 max_samples 个回答
+        all_responses = []
+        for _ in range(max_samples):
+            resp = model.generate(
+                prompt=f"Q: {q['question']}\nA: Let's think step by step.\n",
+                temperature=temperature
+            )
+            answer = extract_answer(resp)
+            is_correct = (answer == q['answer'])
+            all_responses.append({"response": resp, "answer": answer, "correct": is_correct})
+
+        # 对每个 N 值评估三种策略
+        for n in n_values:
+            subset = all_responses[:n]
+
+            # Random: 随机选一个
+            random_correct = subset[np.random.randint(n)]["correct"]
+            results[n]["random"].append(random_correct)
+
+            # Majority Voting: 多数投票
+            counter = collections.Counter(s["answer"] for s in subset)
+            majority_answer = counter.most_common(1)[0][0]
+            majority_correct = (majority_answer == q['answer'])
+            results[n]["majority"].append(majority_correct)
+
+            # Oracle Best-of-N: 是否有至少一个正确
+            oracle_correct = any(s["correct"] for s in subset)
+            results[n]["oracle"].append(oracle_correct)
+
+    # 计算并返回各策略在不同 N 下的准确率
+    summary = {}
+    for n in n_values:
+        summary[n] = {
+            strategy: np.mean(results[n][strategy])
+            for strategy in ["random", "majority", "oracle"]
+        }
+    return summary
+    # 建议用 matplotlib 画出 N vs 准确率曲线
+```
+
+**思考题**：
+1. Oracle Best-of-N 的准确率上升曲线是否与 $1-(1-p)^N$ 的理论预测吻合？试拟合参数 $p$
+2. Majority Voting 和 Oracle Best-of-N 的差距反映了什么？（提示：验证器的质量）
+3. 当 $N$ 从 16 增加到 32 时，准确率提升了多少？收益递减效应是否明显？
+4. 如果将采样温度从 0.7 改为 0.3 或 1.0，曲线形状会如何变化？
+
+---
+
 ## 8. 本章小结
 
 本章系统介绍了 LLM 推理增强技术的完整图景：
@@ -1141,6 +1396,22 @@ graph TB
 4. **推理模型（如 R1）** 通过 RL 训练将推理能力内化到模型参数中
 5. **评估体系**覆盖数学、代码、通用推理等多个维度
 
+### 从"会说"到"会想"：推理能力的意义回顾
+
+推理能力是 LLM 从"博学的鹦鹉"蜕变为"能思考的助手"的关键。没有 CoT 和推理模型，LLM 只是一个高级的自动补全工具；有了推理能力，LLM 能够分解复杂问题、规划多步方案、自我检验和修正错误——这些是真正"智能"行为的基石。
+
+**展望下一模块**：推理能力的增强带来了一个紧迫的工程挑战——**推理效率**。推理模型动辄生成数千乃至上万个推理 token，其推理成本远高于普通模型。当我们将推理模型部署到生产环境时，如何在保持推理质量的同时降低延迟和成本？模块 14 将深入探讨 **KV Cache 优化、量化（Quantization）、推测解码（Speculative Decoding）** 等推理加速技术，这些技术让推理模型在实际应用中变得可行。
+
+```mermaid
+graph LR
+    A["本模块: 推理增强<br/>让模型更会想"] --> B["模块 14: 推理加速<br/>让模型想得更快更省"]
+    B --> C["更快的推理<br/>更低的成本<br/>更广的部署"]
+
+    style A fill:#fff3e0
+    style B fill:#e3f2fd
+    style C fill:#e8f5e9
+```
+
 ---
 
 ## 9. 参考文献
@@ -1157,3 +1428,6 @@ graph TB
 10. Snell, C., et al. (2024). "Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters." arXiv:2408.03314.
 11. Hendrycks, D., et al. (2021). "Measuring Massive Multitask Language Understanding." ICLR 2021.
 12. Chen, M., et al. (2021). "Evaluating Large Language Models Trained on Code." arXiv:2107.03374.
+13. OpenAI (2024). "Learning to Reason with LLMs." OpenAI Blog.
+14. Wang, P., et al. (2024). "Math-Shepherd: Verify and Reinforce LLMs Step-by-step without Human Annotations." ACL 2024.
+15. Brown, B., et al. (2024). "Large Language Monkeys: Scaling Inference Compute with Repeated Sampling." arXiv:2407.21787.
