@@ -4,6 +4,25 @@
 
 ---
 
+## 章节定位
+
+```mermaid
+graph LR
+    M5["模块 5<br/>注意力机制进阶<br/>MHA/MQA/GQA/MLA"] --> M6["<b>模块 6</b><br/>MoE 混合专家模型<br/>路由/负载均衡/DeepSeekMoE"]
+    M6 --> M7["模块 7<br/>数据工程<br/>预训练数据管线"]
+
+    style M6 fill:#ff9,stroke:#333,stroke-width:3px
+```
+
+**核心动机**：在模块 3/4 中，我们了解到 Transformer 的 FFN 层占据了模型参数量的约 2/3。随着模型规模增大，FFN 的计算量线性增长，这意味着**参数量和计算量被紧密耦合**。MoE 的核心创新在于**解耦模型参数量和每次推理的计算量**——通过稀疏激活，让模型拥有远超实际使用量的参数，在不增加推理成本的情况下提升模型容量。
+
+**前置知识**：
+- **FFN 层的设计**（模块 3/4）：标准 FFN 的结构 $\text{FFN}(x) = W_2 \cdot \sigma(W_1 x)$，SwiGLU 变体，以及 FFN 在 Transformer Block 中的角色
+- **注意力机制变体**（模块 5）：MLA 与 MoE 的协同优化是 DeepSeek-V2/V3 的核心设计
+- **基础数学**：Softmax 函数、Top-K 选择、加权求和
+
+---
+
 ## 目录
 
 - [1. MoE 的核心思想](#1-moe-的核心思想)
@@ -14,6 +33,10 @@
 - [6. 参数与计算效率分析](#6-参数与计算效率分析)
 - [7. Google 的 MoE 实践](#7-google-的-moe-实践)
 - [8. DeepSeek 的 MoE 创新](#8-deepseek-的-moe-创新)
+  - [8.3 DeepSeek-V2 的 MoE 设计详解](#83-deepseek-v2-的-moe-设计详解)
+  - [8.4 DeepSeek-V3 的进一步优化](#84-deepseek-v3-的进一步优化)
+  - [8.5 Mixtral vs DeepSeek MoE 的设计哲学对比](#85-mixtral-vs-deepseek-moe-的设计哲学对比)
+  - [8.6 MoE 训练的工程挑战与解决方案](#86-moe-训练的工程挑战与解决方案)
 - [9. Anthropic 视角：MoE 的可解释性与安全性](#9-anthropic-视角moe-的可解释性与安全性)
 - [10. 项目实践](#10-项目实践)
 
@@ -770,6 +793,254 @@ $$\text{Block}(x) = x + \text{MLA}(\text{RMSNorm}(x)) + \text{MoE}(\text{RMSNorm
 
 MLA 压缩了注意力的 KV Cache，MoE 在 FFN 层实现稀疏激活。两者的组合使得 DeepSeek-V3 在推理效率上达到了极致。
 
+### 8.3 DeepSeek-V2 的 MoE 设计详解
+
+DeepSeek-V2 是将 DeepSeekMoE 思想应用于大规模模型的首次成功实践，其 MoE 设计包含多个精心选择的工程决策。
+
+**共享专家 + 路由专家的双轨架构**：
+
+DeepSeek-V2 设置了 **2 个共享专家 + 160 个路由专家**，每次激活 6 个路由专家。共享专家不参与路由，始终被激活，负责处理所有 token 都需要的通用知识（如语法规则、常见模式）。路由专家通过 Top-K 机制稀疏激活，每个小专家专注于更细粒度的知识领域。
+
+**细粒度专家拆分的具体方式**：
+
+传统 MoE（如 Mixtral）使用 8 个大专家，每个专家是完整的 FFN（隐藏维度如 14336）。DeepSeek-V2 将这些大专家拆分为大量小专家：
+
+$$\underbrace{8 \text{ 个大专家}}_{\text{每个隐藏维度 } d_{ff}} \xrightarrow{\text{拆分}} \underbrace{160 \text{ 个小专家}}_{\text{每个隐藏维度 } d_{ff}/20}$$
+
+同时将 Top-K 从 2 增加到 6，使得每次激活的总计算量近似不变，但路由的组合灵活性大幅提升：
+
+$$\binom{8}{2} = 28 \text{ 种组合} \quad \rightarrow \quad \binom{160}{6} \approx 2.1 \times 10^{10} \text{ 种组合}$$
+
+这意味着 DeepSeek-V2 可以为不同的 token 提供**天文数字级别的专家组合选择**，极大地提升了模型的表达能力。
+
+**设备级负载均衡 loss**：
+
+DeepSeek-V2 并未在全局层面强制所有 160 个专家均匀分配 token，而是在**每个 GPU 设备**上独立计算负载均衡。其原因是：全局均衡可能导致跨设备通信量增大，而设备级均衡确保每个 GPU 的计算负载接近，最小化设备间的等待时间。
+
+$$L_{\text{device-balance}} = \alpha \cdot \sum_{d=1}^{D} \sum_{i \in \text{experts}(d)} f_i^{(d)} \cdot P_i^{(d)}$$
+
+其中 $D$ 是设备数，$f_i^{(d)}$ 和 $P_i^{(d)}$ 分别是设备 $d$ 上专家 $i$ 的选择频率和平均路由概率。
+
+### 8.4 DeepSeek-V3 的进一步优化
+
+DeepSeek-V3 在 V2 的基础上进行了多项关键改进。
+
+**无辅助 loss 的负载均衡（Auxiliary-loss-free Load Balancing）**：
+
+传统辅助损失 $L_{\text{aux}} = \alpha \cdot N \cdot \sum f_i P_i$ 虽然有效，但存在一个根本性矛盾：**辅助损失的梯度会干扰主任务的优化方向**。辅助损失系数 $\alpha$ 太大会损害模型质量，太小则负载均衡不足。
+
+DeepSeek-V3 提出了一种巧妙的替代方案——**动态偏置项调整**：
+
+$$\text{routing\_score}_i(x) = h_i(x) + b_i$$
+
+其中 $b_i$ 不通过梯度更新，而是根据运行时统计量直接调整：
+
+```
+算法：动态偏置负载均衡
+--------------------
+初始化: b_i = 0, 对所有专家 i
+
+每隔 T 步:
+    统计当前周期内每个专家的实际负载 load_i
+    计算目标负载 target = total_tokens * K / N
+    对每个专家 i:
+        if load_i > target * (1 + gamma):   # gamma 为容忍度
+            b_i -= delta                     # 降低偏置，减少被选中概率
+        elif load_i < target * (1 - gamma):
+            b_i += delta                     # 提高偏置，增加被选中概率
+```
+
+这种方法的核心优势：
+1. **零额外梯度干扰**：偏置调整完全独立于反向传播，不影响主任务损失的优化
+2. **无需调参**：不需要像辅助损失系数 $\alpha$ 那样精心调节
+3. **实验验证**：DeepSeek-V3 的实验表明，移除辅助损失后模型质量（下游任务评分）有可测量的提升
+
+### 8.5 Mixtral vs DeepSeek MoE 的设计哲学对比
+
+Mixtral（Mistral AI, 2024）和 DeepSeekMoE 代表了两种截然不同的 MoE 设计哲学。
+
+```mermaid
+graph TB
+    subgraph "Mixtral 哲学：少数大专家"
+        M_IN["输入"] --> M_R["路由器"]
+        M_R -->|"Top-2"| M_E1["大专家 1<br/>(完整 FFN)"]
+        M_R -->|"Top-2"| M_E2["大专家 2<br/>(完整 FFN)"]
+        M_R -.-x M_E3["..."]
+        M_R -.-x M_E8["大专家 8<br/>(完整 FFN)"]
+        style M_E1 fill:#ccffcc,stroke:#333
+        style M_E2 fill:#ccffcc,stroke:#333
+        style M_E3 fill:#eee
+        style M_E8 fill:#eee
+    end
+
+    subgraph "DeepSeek 哲学：大量小专家 + 共享专家"
+        D_IN["输入"] --> D_SH["共享专家<br/>(始终激活)"]
+        D_IN --> D_R["路由器"]
+        D_R -->|"Top-6"| D_E1["小专家 1"]
+        D_R -->|"Top-6"| D_E2["小专家 12"]
+        D_R -->|"Top-6"| D_E3["小专家 45"]
+        D_R -->|"..."| D_E4["小专家 98"]
+        D_R -->|"..."| D_E5["小专家 127"]
+        D_R -->|"..."| D_E6["小专家 156"]
+        D_R -.-x D_EX["... 其余 154 个 ..."]
+        style D_SH fill:#aaddff,stroke:#333
+        style D_E1 fill:#ccffcc
+        style D_E2 fill:#ccffcc
+        style D_E3 fill:#ccffcc
+        style D_E4 fill:#ccffcc
+        style D_E5 fill:#ccffcc
+        style D_E6 fill:#ccffcc
+        style D_EX fill:#eee
+    end
+```
+
+| 设计维度 | Mixtral (8x7B) | DeepSeek-V2 | DeepSeek-V3 |
+|----------|----------------|-------------|-------------|
+| 路由专家数 | 8 | 160 | 256 |
+| 共享专家数 | 0 | 2 | 1 |
+| 每次激活路由专家数 | 2 | 6 | 8 |
+| 单个路由专家大小 | 大（完整 FFN） | 小（约 1/20 标准 FFN） | 小 |
+| 路由组合数 $\binom{N}{K}$ | 28 | $\sim 2.1 \times 10^{10}$ | $\sim 4.2 \times 10^{13}$ |
+| 负载均衡方法 | 辅助损失 | 设备级辅助损失 | 无辅助损失（动态偏置） |
+| 总参数量 | 46.7B | 236B | 671B |
+| 激活参数量 | ~12.9B | 21B | 37B |
+
+**各自的优劣分析**：
+
+**Mixtral 的优势**：
+- 实现简单，路由器只需区分 8 个专家
+- 每个专家容量大，知识表达能力强
+- 工程部署相对容易（少量大专家更易于并行）
+
+**Mixtral 的劣势**：
+- 路由粒度粗，28 种组合的表达灵活性有限
+- 没有共享专家，通用知识可能在多个专家间冗余
+- 负载均衡更困难（只有 8 个选择，倾斜更严重）
+
+**DeepSeek MoE 的优势**：
+- 极高的路由灵活性，可为每个 token 提供近乎独特的专家组合
+- 共享专家解耦了通用知识和专业知识，提升专家专业化程度
+- 更低的激活比例（DeepSeek-V3 仅 5.5%），参数效率极高
+
+**DeepSeek MoE 的劣势**：
+- 实现复杂度高，大量小专家增加了内存管理和通信的难度
+- 路由器需要在更大的搜索空间中做出决策
+- All-to-All 通信量可能更大（更多专家分布在更多设备上）
+
+---
+
+## 8.6 MoE 训练的工程挑战与解决方案
+
+MoE 模型的训练不仅涉及算法设计，还面临一系列严峻的工程挑战。理解这些挑战对于真正掌握 MoE 至关重要。
+
+### All-to-All 通信
+
+在稠密模型的数据并行训练中，主要的通信操作是 **AllReduce**（同步梯度）。而 MoE 模型引入了额外的通信模式—— **All-to-All**：每个 GPU 上的 token 需要被发送到持有对应专家的 GPU。
+
+```mermaid
+graph TB
+    subgraph "GPU 0（持有专家 0, 1）"
+        G0_T["token A, B, C"] --> G0_R["路由决策"]
+        G0_R -->|"A→专家0"| G0_E0["专家 0 处理 A"]
+        G0_R -->|"B→专家2"| G0_SEND["发送 B → GPU 1"]
+        G0_R -->|"C→专家3"| G0_SEND2["发送 C → GPU 1"]
+    end
+
+    subgraph "GPU 1（持有专家 2, 3）"
+        G1_T["token D, E, F"] --> G1_R["路由决策"]
+        G1_R -->|"D→专家1"| G1_SEND["发送 D → GPU 0"]
+        G1_R -->|"E→专家2"| G1_E2["专家 2 处理 E"]
+        G1_R -->|"F→专家3"| G1_E3["专家 3 处理 F"]
+    end
+
+    G0_SEND --> G1_E2
+    G0_SEND2 --> G1_E3
+    G1_SEND --> G0_E0
+
+    style G0_SEND fill:#ffcccc
+    style G0_SEND2 fill:#ffcccc
+    style G1_SEND fill:#ffcccc
+```
+
+**通信量分析**：
+
+对于 AllReduce（稠密模型），每个 GPU 需要发送和接收约 $2P$ 的数据量（$P$ 为模型参数量），但这可以通过 Ring AllReduce 高效实现。
+
+对于 All-to-All（MoE 模型），每个 GPU 上的每个 token 需要被发送到目标专家所在的设备。假设有 $D$ 个设备，每个设备上有 $T/D$ 个 token，每个 token 的表示维度为 $d$，则每个设备需要发送：
+
+$$\text{All-to-All 通信量} \approx \frac{T}{D} \cdot d \cdot \frac{D-1}{D} \cdot \text{sizeof(dtype)}$$
+
+在最坏情况下（所有 token 都路由到其他设备），这几乎等于全部 token 数据量。
+
+**解决方案：通信-计算重叠**
+
+DeepSeek-V3 的 DualPipe 策略将 All-to-All 通信与专家计算重叠：
+
+```
+时间线：
+GPU 0: [发送 token 给 GPU 1] [计算本地专家] [接收 GPU 1 结果]
+GPU 1: [接收 GPU 0 token]    [计算本地专家] [发送结果给 GPU 0]
+                              ↑ 重叠区域 ↑
+```
+
+通过在当前层专家计算的同时，提前发送下一层的路由信息，可以将通信延迟几乎完全隐藏在计算之中。
+
+### 专家并行（Expert Parallelism）
+
+专家并行是 MoE 分布式训练的核心策略，它将不同的专家放置在不同的 GPU 上。
+
+**与其他并行策略的组合**：
+
+在实践中，MoE 模型通常采用**三维并行**：数据并行（DP） + 专家并行（EP） + 流水线并行（PP）。
+
+| 并行策略 | 切分对象 | 通信模式 | 适用组件 |
+|----------|---------|---------|---------|
+| 数据并行（DP） | Batch | AllReduce（梯度同步） | 所有层 |
+| 专家并行（EP） | 专家 | All-to-All（token 分发） | MoE 层 |
+| 流水线并行（PP） | 层 | 点对点（激活传递） | 跨层 |
+| 张量并行（TP） | 单层权重 | AllReduce | 共享专家/Attention |
+
+DeepSeek-V3 的典型配置：在 EP 维度上将 256 个路由专家分布到多个节点，同时在 DP 维度上复制整个模型以增大有效 batch size。
+
+### Token Dropping vs No-Dropping
+
+**早期 MoE 的 Token Dropping**：
+
+GShard 和 Switch Transformer 在专家过载时会**丢弃多余的 token**——超过容量因子（Capacity Factor, CF）的 token 通过残差连接直接传递，不经过 MoE 处理。
+
+$$\text{capacity}_i = \text{CF} \times \frac{T \times K}{N}$$
+
+Token dropping 的问题：
+1. **信息损失**：被丢弃的 token 失去了 FFN 处理，影响模型质量
+2. **不确定性**：哪些 token 被丢弃取决于 batch 内的路由分布，增加了训练的随机性
+3. **评估不一致**：训练时丢弃 token，推理时不丢弃，可能导致 train/eval 不一致
+
+**现代方法：No-Dropping**
+
+DeepSeek-V2/V3 采用不丢弃策略，通过更好的负载均衡（辅助损失或动态偏置）确保专家不会严重过载。即使某些专家接收的 token 略多于平均值，也全部处理。
+
+这一选择的工程代价是：需要为每个专家预留更大的缓冲区（buffer），增加了显存占用。但从模型质量角度看，No-Dropping 是更优的选择。
+
+### 训练不稳定性
+
+MoE 模型的训练比稠密模型更容易出现不稳定现象（loss spike、训练发散），原因包括：
+
+1. **路由-专家的耦合反馈**：路由器的微小变化可能导致大量 token 突然改变路由目标，使得专家的训练数据分布剧烈波动
+2. **路由 logits 的数值不稳定**：当某些专家的 logit 值过大时，softmax 可能产生接近 0 或 1 的极端概率
+
+**Router z-loss 的作用**：
+
+PaLM 提出的 Router z-loss 是缓解训练不稳定性的关键工具：
+
+$$L_z = \frac{1}{T} \sum_{t=1}^{T} \left(\log \sum_{i=1}^{N} \exp(h_i(x_t))\right)^2$$
+
+这个损失项惩罚的是 log-partition-function 的平方。当路由 logits 的绝对值过大时，$\log \sum \exp(h_i)$ 也会很大，z-loss 通过梯度将 logits 拉回合理范围。z-loss 的系数 $\beta$ 通常设为 0.001，远小于辅助损失系数 $\alpha$。
+
+**其他稳定性措施**：
+- 使用 **BF16** 而非 FP16（更大的数值范围，避免 logits 溢出）
+- 较长的 **warmup 阶段**（让路由器有充足时间学习合理的分配方案）
+- 较小的 **学习率**（特别是对路由器参数）
+
 ---
 
 ## 9. Anthropic 视角：MoE 的可解释性与安全性
@@ -1051,29 +1322,98 @@ def compute_flops_per_token(model_config):
 
 ---
 
+### 项目 5：MoE 路由策略对比实验（进阶）
+
+**目标**：在小型 MoE 模型上系统对比不同路由策略和负载均衡方法的效果，理解设计选择对模型质量和训练稳定性的影响。
+
+**实验设计**：
+
+```mermaid
+graph TB
+    subgraph "路由策略维度"
+        R1["Top-1 路由<br/>(Switch Transformer 风格)"]
+        R2["Top-2 路由<br/>(Shazeer et al. 风格)"]
+        R3["Top-K + 共享专家<br/>(DeepSeek 风格)"]
+    end
+
+    subgraph "负载均衡维度"
+        B1["无均衡<br/>(基线)"]
+        B2["辅助损失<br/>(alpha=0.01)"]
+        B3["动态偏置<br/>(DeepSeek-V3 风格)"]
+    end
+
+    subgraph "观测指标"
+        O1["专家利用率分布"]
+        O2["训练 loss 曲线"]
+        O3["验证集 PPL"]
+        O4["路由坍塌检测"]
+    end
+
+    R1 & R2 & R3 --> |"组合"| B1 & B2 & B3
+    B1 & B2 & B3 --> O1 & O2 & O3 & O4
+```
+
+**模型配置建议**（小型可训练规模）：
+
+```python
+# 模型配置伪代码
+config = {
+    "d_model": 256,
+    "n_layers": 4,           # MoE 层在偶数层
+    "n_heads": 4,
+    "num_experts": 16,       # 路由专家数
+    "num_shared_experts": 0,  # 无共享专家（基线）/ 2（DeepSeek 风格）
+    "top_k": 1,              # 变量：1, 2, 4
+    "vocab_size": 8000,
+    "max_seq_len": 256,
+}
+# 训练数据：WikiText-2 或类似小型语料
+# 训练步数：5000-10000 步
+# 观察间隔：每 100 步记录专家利用率
+```
+
+**关键分析要求**：
+
+1. **专家利用率热图**：绘制 (训练步数 x 专家编号) 的热图，观察不同策略下专家利用率的时间演化
+2. **路由坍塌检测**：计算每 100 步的专家利用率变异系数（CV），检测是否出现"赢者通吃"现象
+3. **负载均衡方法对比**：在相同路由策略下，对比三种均衡方法对最终 PPL 和专家利用率的影响
+4. **关键思考题**：
+   - 为什么负载均衡如此重要？如果 90% 的 token 都路由到同一个专家，模型的有效参数量是多少？
+   - 辅助损失系数 $\alpha$ 太大或太小分别会导致什么问题？
+   - 动态偏置方法相比辅助损失，在什么情况下更有优势？
+
+---
+
 ## 本章小结
 
 ### 核心知识点
 
 1. **MoE 核心思想**：稀疏激活——每个 token 只使用部分专家，实现参数量与计算量的解耦
 2. **路由机制**：Top-K Router 是主流方案，Expert Choice 是一种天然均衡的替代
-3. **负载均衡**：辅助损失 $L_{\text{aux}} = \alpha N \sum f_i P_i$ 防止路由坍塌
-4. **DeepSeekMoE**：细粒度专家提高路由精度，共享专家处理通用知识
-5. **参数效率**：MoE 的总参数量远大于激活参数量，在相同 FLOPs 下获得更好的性能
+3. **负载均衡**：辅助损失 $L_{\text{aux}} = \alpha N \sum f_i P_i$ 防止路由坍塌；DeepSeek-V3 的动态偏置方法消除了辅助损失对模型质量的干扰
+4. **DeepSeekMoE**：细粒度专家（160/256 个小专家）提高路由精度，共享专家处理通用知识
+5. **参数效率**：MoE 的总参数量远大于激活参数量，在相同 FLOPs 下获得更好的性能（DeepSeek-V3：671B 总参数，仅 37B 激活）
+6. **设计哲学对比**：Mixtral 的"少数大专家"vs DeepSeek 的"大量小专家 + 共享专家"，各有优劣
+7. **工程挑战**：All-to-All 通信、专家并行、Token Dropping、训练不稳定性是 MoE 训练的四大工程难题
 
 ### 数学要点
 
 - 路由公式：$g_i(x) = \text{softmax}(\text{TopK}(W_g x))_i$
 - 辅助损失：$L_{\text{aux}} = \alpha \cdot N \cdot \sum_{i=1}^{N} f_i \cdot P_i$
+- Router z-loss：$L_z = \frac{1}{T} \sum_{t=1}^{T} \left(\log \sum_{i=1}^{N} \exp(h_i(x_t))\right)^2$
 - 效率比：$P_{\text{total}} / P_{\text{active}} = N / K$
 - DeepSeekMoE：$\text{MoE}(x) = \sum_s E_s(x) + \sum_{j \in \text{TopK}} g_j \cdot E_j(x)$
+- 路由组合灵活性：$\binom{N}{K}$（DeepSeek-V3：$\binom{256}{8} \approx 4.2 \times 10^{13}$）
+- 动态偏置路由：$\text{routing\_score}_i(x) = h_i(x) + b_i$，$b_i$ 根据运行时负载统计调整
 
 ### 与其他模块的联系
 
 - **模块 3（Transformer）**：MoE 替换了标准 Transformer Block 中的 FFN 层
+- **模块 4（Decoder-Only）**：理解 FFN 在整体架构中的参数占比，是理解 MoE 动机的前提
 - **模块 5（注意力变体）**：DeepSeek 同时使用 MLA 和 MoE，两者协同优化推理效率
-- **模块 8C（训练工程）**：MoE 训练的特殊工程挑战（负载均衡、专家并行）
-- **模块 9（分布式训练）**：专家并行（Expert Parallelism）是 MoE 分布式训练的关键策略
+- **模块 8C（训练工程）**：MoE 训练的特殊工程挑战（负载均衡、专家并行、训练稳定性）
+- **模块 9（分布式训练）**：专家并行（Expert Parallelism）是 MoE 分布式训练的关键策略，All-to-All 通信是核心瓶颈
+- **模块 10（SFT）**：MoE 模型的微调面临独特挑战（LoRA 应用于哪些专家？见 advanced.md）
 
 ---
 
@@ -1086,15 +1426,27 @@ def compute_flops_per_token(model_config):
 3. Fedus et al. (2022). *Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity*.
 4. Lepikhin et al. (2021). *GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding*.
 5. Zhou et al. (2022). *Mixture-of-Experts with Expert Choice Routing*.
-6. DeepSeek-AI (2024). *DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models*.
-7. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model*.
-8. DeepSeek-AI (2024). *DeepSeek-V3 Technical Report*.
+6. Zoph et al. (2022). *ST-MoE: Designing Stable and Transferable Sparse Expert Models*.
+7. Jiang et al. (2024). *Mixtral of Experts*. Mistral AI.
+8. DeepSeek-AI (2024). *DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models*.
+9. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model*.
+10. DeepSeek-AI (2024). *DeepSeek-V3 Technical Report*.
 
 ### 博客
 
 1. [Switch Transformer 官方博客](https://arxiv.org/abs/2101.03961)
 2. [Mixture of Experts Explained](https://huggingface.co/blog/moe) - Hugging Face
 3. [DeepSeek-V2 技术解读](https://arxiv.org/abs/2405.04434)
+
+---
+
+## 从架构到数据：通往模块 7 的桥梁
+
+到目前为止，我们在模块 3-6 中完成了 LLM 架构设计的核心内容：从标准 Transformer Block（模块 3）到 Decoder-Only 架构（模块 4），从注意力机制变体（模块 5）到 MoE 稀疏激活（模块 6）。这些模块回答了一个核心问题：**模型应该如何设计？**
+
+但一个再精巧的架构，没有高质量的训练数据也无法发挥其潜力。事实上，Chinchilla Scaling Laws 告诉我们，数据量和模型参数量应当同步增长。DeepSeek-V3 拥有 671B 参数，但其训练使用了 14.8T tokens 的海量数据——这些数据从何而来？如何确保质量？如何混合不同来源的数据？
+
+**模块 7（数据工程）** 将深入 LLM 训练数据管线的每一个环节：从 Common Crawl 等原始数据源的获取，到去重（MinHash + LSH）、质量过滤（基于规则和模型）、数据混合策略，最终构建一条高效的端到端数据处理管线。这是将架构设计转化为实际训练能力的关键一步。
 
 ---
 
