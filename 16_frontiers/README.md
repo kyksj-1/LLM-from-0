@@ -2,6 +2,41 @@
 
 > 大语言模型已经从"能用"走向"好用"，但距离"可信"还有很长的路。本章聚焦三个决定 LLM 未来走向的前沿领域：**机械可解释性**（我们能理解模型在做什么吗？）、**AI 安全**（模型会不会做出有害的事情？）、**多模态能力与 Agent 系统**（模型能否看、听、行动？）。这是本教程的最终章，也是将前 15 章知识融会贯通的综合应用。
 
+### 前置知识与章节定位
+
+本章建立在前 15 章的完整知识体系之上，是所有内容的"汇流点"：
+
+```mermaid
+graph LR
+    subgraph "基础层"
+        M3["模块3: Transformer"] --> M16["模块16: 前沿专题"]
+        M5["模块5: 注意力变体"] --> M16
+    end
+
+    subgraph "训练层"
+        M8["模块8: 预训练"] --> M16
+        M11["模块11: RLHF"] --> M16
+        M12["模块12: DPO"] --> M16
+    end
+
+    subgraph "应用层"
+        M13["模块13: CoT推理"] --> M16
+        M14["模块14: 推理加速"] --> M16
+        M15["模块15: RAG"] --> M16
+    end
+
+    M16 --> FP["终极项目"]
+
+    style M16 fill:#ff9800,color:#fff
+    style FP fill:#4caf50,color:#fff
+```
+
+**你需要的前置知识**：
+- **Transformer 内部结构**（模块 3/5）→ 理解 Circuits 分析和注意力头功能
+- **RLHF/DPO 对齐方法**（模块 11/12）→ 理解 Constitutional AI 的训练流程
+- **推理加速技术**（模块 14）→ 理解多模态推理的工程挑战
+- **RAG 检索增强**（模块 15）→ 理解 Agent 如何调用外部知识
+
 ---
 
 ## 目录
@@ -9,10 +44,11 @@
 - [1. 机械可解释性（Mechanistic Interpretability）](#1-机械可解释性mechanistic-interpretability)
 - [2. AI 安全](#2-ai-安全)
 - [3. 多模态 LLM](#3-多模态-llm)
-- [4. Agent 与工具使用](#4-agent-与工具使用)
-- [5. 三条技术线的前沿实践](#5-三条技术线的前沿实践)
-- [6. 项目实践](#6-项目实践)
-- [7. 本章小结](#7-本章小结)
+- [4. 长上下文技术前沿](#4-长上下文技术前沿)
+- [5. Agent 与工具使用](#5-agent-与工具使用)
+- [6. 三条技术线的前沿实践](#6-三条技术线的前沿实践)
+- [7. 项目实践](#7-项目实践)
+- [8. 本章小结与全教程总结](#8-本章小结与全教程总结)
 
 ---
 
@@ -529,13 +565,158 @@ Gemini 将所有模态统一为 token 序列：
 | **全参数训练** | 最高成本 | Gemini, InternVL |
 | **渐进解冻** | 逐步解冻视觉编码器 | 一些混合方案 |
 
+#### 多模态训练的工程挑战
+
+在实际工程中，多模态训练面临一系列独特的挑战：
+
+| 挑战 | 描述 | 工业界解决方案 |
+|------|------|---------------|
+| **模态不平衡** | 文本数据远多于图文对数据 | 分阶段训练 + 数据混合比例调度 |
+| **视觉 Token 膨胀** | 高分辨率图像产生大量 token | 动态分辨率 (DeepSeek-VL) / Token 压缩 |
+| **显存压力** | 视觉编码器 + LLM 共同占用 | 冻结视觉编码器 / 梯度检查点 |
+| **对齐质量** | 视觉特征与语言空间的对齐 | 高质量图文对数据 + 多阶段训练 |
+| **幻觉问题** | 模型描述图像中不存在的内容 | RLHF 对齐 + 视觉 grounding 训练 |
+
+**视觉 Token 数量的工程权衡**：
+
+一张 224×224 的图像，以 14×14 patch 划分，产生 256 个视觉 token。但如果处理 1024×1024 的高分辨率图像，token 数将膨胀到约 5000 个。这对 LLM 的上下文窗口和计算量都是巨大负担。
+
+```
+分辨率 → Token 数量 → 计算成本
+
+224×224   →  256 tokens  →  基准
+448×448   →  1024 tokens →  ~4× 计算
+1024×1024 →  5329 tokens →  ~21× 计算
+
+工业解决方案:
+1. 动态分辨率: 根据图像内容自适应选择分辨率 (DeepSeek-VL)
+2. Token 压缩: 用 Perceiver/Q-Former 将视觉 token 压缩到固定数量 (BLIP-2)
+3. 分块编码: 将高分辨率图像分成多个 tile, 独立编码后融合 (LLaVA-NeXT)
+```
+
+**Google 的多模态工程实践**：
+
+Google Gemini 的工程亮点之一是**多模态 Sequence Packing**。在训练中，不同模态的样本被打包到同一个序列中，避免了单纯按图文对训练时的 padding 浪费：
+
+```
+传统方式 (每个样本独立):
+  [图像tokens | 文本tokens | PAD PAD PAD PAD]  ← 大量浪费
+  [图像tokens | 文本tokens | PAD PAD]
+
+Gemini 方式 (多模态打包):
+  [图像tokens | 文本tokens | SEP | 纯文本tokens]  ← 充分利用
+  [视频tokens | 文本tokens | SEP | 图文tokens]
+```
+
 多模态基础架构的完整实现参见 `code/advanced_topics/multimodal_basic.py`。
 
 ---
 
-## 4. Agent 与工具使用
+## 4. 长上下文技术前沿
 
-### 4.1 Function Calling 的实现原理
+### 4.1 从 4K 到 10M：上下文窗口的演进
+
+上下文窗口的长度是 LLM 能力的关键瓶颈之一。它直接决定了模型能"看到"多少信息：
+
+| 模型 | 上下文长度 | 等效内容 | 年份 |
+|------|-----------|---------|------|
+| GPT-2 | 1K tokens | ~1页 | 2019 |
+| GPT-3 | 4K tokens | ~3页 | 2020 |
+| Claude 2 | 100K tokens | ~1本书 | 2023 |
+| Gemini 1.5 Pro | 1M tokens | ~10本书 | 2024 |
+| Gemini 1.5 Pro (实验) | 10M tokens | ~100本书 | 2024 |
+
+**为什么长上下文很难？** 核心瓶颈是注意力机制的 $O(n^2)$ 复杂度（参见模块 5）。当序列长度从 4K 增加到 1M 时，计算量增加了 $62500$ 倍。
+
+### 4.2 位置编码外推技术
+
+标准 RoPE（参见模块 2）在训练时使用固定的最大长度，超出后性能急剧下降。以下技术可以让模型在推理时处理更长的序列：
+
+**NTK-Aware RoPE Scaling**：
+
+核心思想是修改 RoPE 的基频 $\theta$，使高频分量保持精度，低频分量的周期拉长：
+
+$$\theta'_i = \theta_{\text{base}}^{2i/d} \cdot s^{2i/(d-2)}$$
+
+其中 $s$ 是缩放因子（如将 4K 外推到 32K 时 $s = 8$）。
+
+**YaRN（Yet another RoPE extensioN）**：
+
+YaRN 在 NTK-Aware 的基础上引入了**注意力缩放因子**，对注意力分数进行温度调节：
+
+$$\text{attn}(q, k) = \frac{q \cdot k}{\sqrt{d} \cdot t(s)}$$
+
+其中 $t(s)$ 是根据缩放因子计算的温度参数。
+
+| 方法 | 是否需要微调 | 外推倍数 | 质量 |
+|------|------------|---------|------|
+| 直接外推 | 否 | ~1.5× | 差 |
+| 线性插值 | 是（少量） | ~4× | 中 |
+| NTK-Aware | 否 | ~4-8× | 良 |
+| YaRN | 是（少量） | ~8-32× | 优 |
+| ABF (Anthropic) | 未公开 | ~32× | 优 [推测] |
+
+### 4.3 高效长序列注意力
+
+处理超长序列需要突破 $O(n^2)$ 的计算瓶颈：
+
+**Ring Attention**：
+
+将超长序列分布到多个 GPU 上，每个 GPU 只持有序列的一部分。通过 GPU 之间的**环形通信**，每个 GPU 轮流获取其他 GPU 的 KV 对来计算注意力：
+
+```mermaid
+graph LR
+    subgraph "Ring Attention (4 GPU)"
+        GPU0["GPU 0<br/>Q: [0:L/4]<br/>KV: 轮流接收"] --> |"发送 KV"| GPU1["GPU 1<br/>Q: [L/4:L/2]"]
+        GPU1 --> |"发送 KV"| GPU2["GPU 2<br/>Q: [L/2:3L/4]"]
+        GPU2 --> |"发送 KV"| GPU3["GPU 3<br/>Q: [3L/4:L]"]
+        GPU3 --> |"发送 KV"| GPU0
+    end
+```
+
+**优势**：序列长度可以线性扩展——4 张 GPU 可以处理 4 倍长的序列。
+
+**Striped Attention**：
+
+Ring Attention 的改进版。问题是：在因果注意力中，前面的 token 需要关注的 KV 少，后面的多，导致**负载不均衡**。Striped Attention 通过**交错分配** token 来平衡负载：
+
+```
+Ring Attention 分配:     GPU0: [0,1,2,3]  GPU1: [4,5,6,7]  GPU2: [8,9,10,11]
+                        ← 计算少          中等               计算多 →
+
+Striped Attention 分配:  GPU0: [0,3,6,9]  GPU1: [1,4,7,10]  GPU2: [2,5,8,11]
+                        ← 每个 GPU 的计算量大致相等 →
+```
+
+### 4.4 长上下文的评估与应用
+
+**"Needle in a Haystack" 测试**：
+
+在超长文本中随机插入一个关键信息（"needle"），测试模型能否找到它。这是评估长上下文能力的标准方法。
+
+| 模型 | 4K 准确率 | 32K 准确率 | 128K 准确率 | 1M 准确率 |
+|------|----------|-----------|------------|----------|
+| GPT-4 Turbo | 100% | 95% | 87% | N/A |
+| Claude 3 Opus | 100% | 100% | 98% | N/A |
+| Gemini 1.5 Pro | 100% | 100% | 100% | 99.7% |
+
+> 注：以上数据为各公司公开报告的近似值，测试条件可能不完全一致。
+
+**工业应用场景**：
+
+| 应用 | 所需上下文 | 典型模型 |
+|------|-----------|---------|
+| 代码库分析 | 50K-200K tokens | Claude, GPT-4 |
+| 整本书问答 | 100K-500K tokens | Gemini 1.5, Claude 3 |
+| 长视频理解 | 500K-1M tokens | Gemini 1.5 |
+| 多文档综合分析 | 200K-1M tokens | Gemini 1.5, Claude 3 |
+| 大型数据库 Schema | 50K-100K tokens | Claude, GPT-4 |
+
+---
+
+## 5. Agent 与工具使用
+
+### 5.1 Function Calling 的实现原理
 
 **Function Calling** 使 LLM 从"只能说"变为"能做事"。其核心是让 LLM 输出结构化的工具调用指令，而非纯文本。
 
@@ -582,7 +763,7 @@ LLM 需要知道有哪些工具可用。标准做法是在 system prompt 中提�
 3. **参数验证器**：检查参数类型、必需参数、枚举值
 4. **执行引擎**：安全地调用实际的 Python 函数
 
-### 4.2 ReAct 框架
+### 5.2 ReAct 框架
 
 **ReAct (Reasoning + Acting)** 是最流行的 Agent 框架之一。它让 LLM 交替进行**推理**（Thought）和**行动**（Action），形成可追踪的决策链。
 
@@ -612,7 +793,7 @@ graph TB
 | **Act-only** | 无 | 有 | 可调用工具 | 无规划，容易出错 |
 | **ReAct** | 有 | 有 | 推理指导行动，行动提供信息 | 步骤多，延迟高 |
 
-### 4.3 多步推理与工具调用的协同
+### 5.3 多步推理与工具调用的协同
 
 复杂任务往往需要**多个工具的协同调用**。
 
@@ -644,7 +825,7 @@ Thought: 工具调用失败, 我需要告诉用户这个城市不在数据库中
 Answer: 抱歉, 我无法查询到 Atlantis 的天气信息。这个城市可能不在我的数据库中。
 ```
 
-### 4.4 Agent 安全性挑战
+### 5.4 Agent 安全性挑战
 
 Agent 拥有调用工具的能力，这引入了新的安全风险：
 
@@ -674,11 +855,175 @@ Agent 可能被劫持执行恶意操作
 
 Function Calling 和 ReAct Agent 的完整实现参见 `code/advanced_topics/function_calling.py`。
 
+### 5.5 Multi-Agent 系统与编排
+
+#### 单 Agent 的局限性
+
+当任务复杂度超过一定阈值时，单个 Agent 往往力不从心：
+
+| 局限 | 描述 | 典型场景 |
+|------|------|----------|
+| **上下文窗口溢出** | 复杂任务的推理链 + 工具返回值快速填满上下文 | 多文档分析、大型代码库重构 |
+| **角色冲突** | 同一 Agent 既要写代码又要审查代码，难以客观 | 代码生成 + 质量保证 |
+| **任务过复杂** | 需要同时考虑的维度太多，单个 prompt 难以覆盖 | 端到端产品开发 |
+| **专业性不足** | 一个 Agent 无法在所有领域都表现出色 | 跨学科研究任务 |
+
+#### Multi-Agent 架构模式
+
+**1. 主从式（Orchestrator + Workers）**
+
+一个"编排者" Agent 负责任务分解和分配，多个"工人" Agent 分别完成子任务：
+
+```mermaid
+graph TB
+    USER["用户请求"] --> ORCH["Orchestrator Agent<br/>任务分解 + 结果整合"]
+    ORCH --> W1["Worker 1<br/>代码编写"]
+    ORCH --> W2["Worker 2<br/>文档撰写"]
+    ORCH --> W3["Worker 3<br/>测试生成"]
+    W1 --> ORCH
+    W2 --> ORCH
+    W3 --> ORCH
+    ORCH --> RESULT["最终结果"]
+
+    style ORCH fill:#ff9800,color:#fff
+    style W1 fill:#4caf50,color:#fff
+    style W2 fill:#4caf50,color:#fff
+    style W3 fill:#4caf50,color:#fff
+```
+
+**2. 辩论式（Multi-Agent Debate）**
+
+多个 Agent 对同一问题给出不同观点，通过多轮辩论达成共识：
+- Agent A 提出方案，Agent B 进行批评，Agent C 综合判断
+- 适用于需要多角度分析的决策场景（如安全审查、方案评审）
+- 研究表明辩论式架构在数学推理和事实核查上优于单 Agent
+
+**3. 流水线式（Pipeline）**
+
+任务按阶段传递，每个 Agent 负责一个阶段：
+
+```
+需求分析 Agent → 架构设计 Agent → 编码 Agent → 测试 Agent → 部署 Agent
+```
+
+#### 工业实践
+
+- **Google** 的 Agent 框架思路强调标准化的工具接口和安全的执行环境，Gemini 模型本身支持原生的多步工具调用，为 Multi-Agent 协作提供了基础能力
+- **DeepSeek** 在 coding agent 领域进行了探索，结合其强大的代码生成能力（DeepSeek-Coder）与 Agent 框架，在代码补全、修复、重构等任务上展现出竞争力
+
+#### 工程挑战
+
+| 挑战 | 描述 | 常见解决方案 |
+|------|------|-------------|
+| **Agent 间通信** | 如何高效传递上下文和中间结果 | 共享状态存储、消息队列 |
+| **状态管理** | 多个 Agent 的状态如何保持一致 | 中心化状态管理器 |
+| **错误恢复** | 某个 Worker 失败时如何处理 | 重试机制、降级策略、人类介入 |
+| **成本控制** | 多 Agent 意味着多次 LLM 调用 | 任务缓存、轻量级 Agent 处理简单任务 |
+| **可观测性** | 调试多 Agent 系统非常困难 | 完整的日志追踪、执行可视化 |
+
+### 5.6 Code Agent 与代码生成
+
+#### 代码生成的特殊挑战
+
+与自然语言生成不同，代码生成有更严格的正确性要求：
+
+| 层次 | 要求 | 验证方式 |
+|------|------|----------|
+| **语法正确性** | 代码必须能通过编译器/解释器 | 静态分析、解析 |
+| **逻辑正确性** | 代码的行为必须符合预期 | 单元测试、集成测试 |
+| **风格一致性** | 与项目现有风格保持一致 | Linter、代码审查 |
+| **安全性** | 不引入安全漏洞 | 安全扫描、依赖检查 |
+
+#### Code Agent 的典型工作流
+
+```
+1. 理解需求 → 分析用户意图和项目上下文
+2. 分解任务 → 将复杂需求拆分为可管理的子任务
+3. 生成代码 → 编写实现代码
+4. 执行测试 → 运行现有测试和新写的测试
+5. 修复 Bug → 根据测试结果迭代修复
+6. 代码审查 → 自我审查或交给审查 Agent
+```
+
+这个循环可能执行多次，直到所有测试通过且代码质量达标。
+
+#### 工业产品对比
+
+| 产品 | 技术路线 | 交互方式 | 核心能力 |
+|------|----------|----------|----------|
+| **GitHub Copilot** | 代码补全 + 内联建议 | IDE 内嵌 | 实时代码建议，上下文感知 |
+| **Cursor** | Agent 模式 + 多文件编辑 | IDE 原生集成 | 跨文件理解，终端操作 |
+| **Devin** | 全自主 Agent | 独立工作空间 | 端到端任务完成，自主调试 |
+| **Claude Code** | CLI Agent + 工具调用 | 终端交互 | 代码理解、生成、测试、Git 操作 |
+
+#### 代码 Agent 与传统代码补全的本质区别
+
+传统代码补全（如早期 Copilot）是**单步预测**——给定当前光标位置，预测接下来的几行代码。Code Agent 则是**多步推理与行动**——它能够理解整个项目、规划修改策略、修改多个文件、运行测试、根据错误反馈迭代修复。本质上，这是从**自回归补全**到 **ReAct 循环**的范式转变。
+
+### 5.7 Anthropic MCP (Model Context Protocol)
+
+#### MCP 是什么？
+
+**MCP（Model Context Protocol）** 是 Anthropic 于 2024 年底推出的一项开放标准，旨在为 AI 模型提供**统一的外部工具和数据源连接方式**。可以将 MCP 类比为 AI 世界的 "USB-C 接口"——不同的工具和数据源都通过同一个标准协议与 AI 模型连接。
+
+#### 核心架构
+
+MCP 采用三层架构：
+
+```mermaid
+graph LR
+    subgraph "MCP 架构"
+        HOST["Host（MCP 宿主）<br/>如 Claude Desktop / IDE"] --> CLIENT["MCP Client<br/>协议适配层"]
+        CLIENT --> |"标准化 MCP 协议"| SERVER1["MCP Server A<br/>文件系统"]
+        CLIENT --> |"标准化 MCP 协议"| SERVER2["MCP Server B<br/>数据库"]
+        CLIENT --> |"标准化 MCP 协议"| SERVER3["MCP Server C<br/>Web API"]
+    end
+
+    style HOST fill:#e3f2fd
+    style CLIENT fill:#fff3e0
+    style SERVER1 fill:#c8e6c9
+    style SERVER2 fill:#c8e6c9
+    style SERVER3 fill:#c8e6c9
+```
+
+- **Host**：运行 LLM 应用的宿主程序（如 Claude Desktop、IDE 插件等）
+- **Client**：每个 Host 包含一个或多个 MCP Client，负责与 Server 通信
+- **Server**：轻量级程序，通过 MCP 协议暴露特定能力（如文件读写、数据库查询、API 调用）
+
+#### 与传统 Function Calling 的区别
+
+| 维度 | 传统 Function Calling | MCP |
+|------|----------------------|-----|
+| **标准化** | 各厂商自定义格式 | 开放标准协议 |
+| **工具发现** | 预先写死在 prompt 中 | 动态发现可用工具 |
+| **安全模型** | 无统一安全机制 | 内置权限控制与沙箱 |
+| **可复用性** | 为每个模型单独适配 | 一次开发，多处使用 |
+| **生态** | 封闭生态 | 开放生态，社区共建 |
+
+#### MCP 的三种核心能力
+
+1. **Resources（资源）**：允许 Server 向 LLM 暴露数据，如文件内容、数据库记录、API 返回值。LLM 可以读取这些资源作为上下文。
+
+2. **Tools（工具）**：允许 LLM 通过 Server 执行操作，如创建文件、发送邮件、执行代码。这是 MCP 最核心的能力。
+
+3. **Prompts（提示模板）**：Server 可以提供预定义的提示模板，帮助用户以最优方式与 LLM 交互。
+
+#### MCP 对 Agent 生态的影响
+
+MCP 的出现正在重塑 Agent 工具生态：
+
+- **降低了工具开发门槛**：开发者只需实现一个 MCP Server，就能让所有支持 MCP 的 AI 应用使用自己的工具
+- **提升了安全性**：标准化的权限模型使得工具调用可审计、可控制
+- **促进了互操作性**：不同 AI 模型和应用之间可以共享工具生态
+- **使 Agent 行为更可解释**：通过标准化的日志和审计机制，Agent 的每一步操作都可追溯
+
+> MCP 目前仍在快速发展中，生态还在建设期。但其 "USB-C for AI" 的设计理念，有望成为 Agent 时代的基础设施标准之一。
+
 ---
 
-## 5. 三条技术线的前沿实践
+## 6. 三条技术线的前沿实践
 
-### 5.1 Google：Gemini 多模态与 AI 安全
+### 6.1 Google：Gemini 多模态与 AI 安全
 
 **多模态方面**：
 - **Gemini Ultra/Pro/Nano**：不同规模的原生多模态模型
@@ -692,7 +1037,7 @@ Function Calling 和 ReAct Agent 的完整实现参见 `code/advanced_topics/fun
 - **评估基准**：推动多个安全评估基准的建设
 - **Responsible AI Practices**：发布负责任 AI 开发实践指南
 
-### 5.2 DeepSeek：VL 多模态与开源安全
+### 6.2 DeepSeek：VL 多模态与开源安全
 
 **多模态方面**：
 - **DeepSeek-VL**：基于 DeepSeek-LLM 的多模态扩展
@@ -705,7 +1050,7 @@ Function Calling 和 ReAct Agent 的完整实现参见 `code/advanced_topics/fun
 - **中文安全**：在中文场景下的安全挑战和解决方案
 - **透明度**：发布详细的技术报告，包括安全评估结果
 
-### 5.3 Anthropic：可解释性与 Constitutional AI
+### 6.3 Anthropic：可解释性与 Constitutional AI
 
 **可解释性方面（核心优势）**：
 - **Superposition 理论**：提出并验证了 Superposition 假说
@@ -723,7 +1068,7 @@ Function Calling 和 ReAct Agent 的完整实现参见 `code/advanced_topics/fun
 
 ---
 
-## 6. 项目实践
+## 7. 项目实践
 
 ### 项目 1：训练一个简单的 Sparse Autoencoder (⭐⭐ 进阶)
 
@@ -990,7 +1335,124 @@ loss.backward()
 
 ---
 
-## 7. 本章小结
+### 项目 5：构建一个多步 ReAct Agent (⭐⭐ 进阶)
+
+**目标**：实现一个能够使用多种工具（计算器、搜索、代码执行）的 ReAct Agent，理解 Agent 的核心推理循环。
+
+**提供内容**：ReAct 循环框架 + 工具注册接口
+
+**核心步骤**：
+
+1. **实现工具注册中心**：
+   - 定义统一的工具接口：`Tool(name, description, parameters, function)`
+   - 实现工具注册和发现机制
+   - 至少注册三种工具：计算器（数学表达式求值）、搜索（模拟搜索或调用简单 API）、代码执行（安全沙箱中运行 Python）
+
+2. **实现 ReAct 推理循环**：
+   ```python
+   # ReAct 循环核心伪代码
+   def react_loop(question, tools, max_steps=10):
+       history = [{"role": "user", "content": question}]
+       for step in range(max_steps):
+           # 1. LLM 生成 Thought + Action（或 Final Answer）
+           response = llm_generate(history, tools)
+           thought, action = parse_response(response)
+
+           if action.type == "final_answer":
+               return action.content
+
+           # 2. 执行工具调用
+           try:
+               observation = tools[action.name].execute(action.args)
+           except Exception as e:
+               observation = f"工具调用失败: {str(e)}"
+
+           # 3. 将 Observation 加入历史
+           history.append({"role": "assistant", "content": f"Thought: {thought}\nAction: {action}"})
+           history.append({"role": "tool", "content": f"Observation: {observation}"})
+
+       return "达到最大步数限制，无法完成任务"
+   ```
+
+3. **错误处理与安全机制**：
+   - 最大步数限制：防止无限循环
+   - 工具调用超时：每个工具设置执行时间上限
+   - 参数验证：在调用工具前检查参数合法性
+   - 循环检测：检测 Agent 是否在重复相同的操作
+
+4. **评估与测试**：
+   - 准备 10-20 个需要多步推理的测试问题
+   - 记录每个问题的推理步数、工具调用次数、最终正确性
+   - 分析失败案例的原因
+
+**思考问题**：
+- 如何评估 Agent 的可靠性？单纯的准确率是否足够？
+- 如何防止无限循环？除了最大步数，还有什么更智能的方法？
+- 当多个工具都可能提供答案时，Agent 应该如何选择？
+
+---
+
+### 项目 6：长上下文 "Needle in a Haystack" 评估 (⭐ 入门)
+
+**目标**：在不同上下文长度下测试模型的信息检索能力，理解长上下文的挑战。
+
+**提供内容**：评估框架 + 可视化热力图工具
+
+**核心步骤**：
+
+1. **准备干扰文本（Haystack）**：
+   - 收集一组无害的长文本（如 Wikipedia 文章、小说段落）
+   - 将它们拼接成不同长度的"干扰文本"：1K、2K、4K、8K、16K tokens
+
+2. **插入目标信息（Needle）**：
+   - 设计一条唯一的、容易验证的目标信息（如"某年某月，某城市的天气温度是42度"）
+   - 在干扰文本的不同位置插入目标信息：开头 (0%)、25%、50%、75%、末尾 (100%)
+
+3. **测试检索能力**：
+   ```python
+   # 伪代码: Needle in a Haystack 评估
+   def evaluate_needle_in_haystack(model, needle, haystack_texts, positions, lengths):
+       """
+       参数:
+           model: 待评估的语言模型
+           needle: 目标信息字符串
+           haystack_texts: 干扰文本列表
+           positions: 插入位置比例列表 [0.0, 0.25, 0.5, 0.75, 1.0]
+           lengths: 上下文长度列表 [1000, 2000, 4000, 8000, 16000]
+       返回:
+           results: 二维数组 [len(positions) x len(lengths)]，每个元素为检索准确率
+       """
+       results = np.zeros((len(positions), len(lengths)))
+       for i, pos in enumerate(positions):
+           for j, length in enumerate(lengths):
+               # 构造文本: 在指定位置插入 needle
+               context = build_context(haystack_texts, needle, pos, length)
+               # 向模型提问
+               prompt = f"{context}\n\n问题: {extract_question_from_needle(needle)}"
+               response = model.generate(prompt)
+               # 判断是否正确找到信息
+               results[i][j] = check_answer(response, needle)
+       return results
+   ```
+
+4. **可视化热力图**：
+   - X 轴：上下文长度
+   - Y 轴：Needle 插入位置
+   - 颜色：检索准确率（绿色=正确，红色=失败）
+   - 这种可视化能直观展示模型在不同条件下的检索能力
+
+**预期观察**：
+- 较短上下文中，所有位置的准确率都应接近 100%
+- 随着上下文增长，中间位置（25%-75%）的准确率通常先下降（"Lost in the Middle" 现象）
+- 开头和结尾位置通常比中间位置表现更好
+
+**思考问题**：
+- 为什么模型在长文本中间容易"丢失"信息？（提示：与注意力机制的分布有关）
+- 如何改进模型的长上下文检索能力？（提示：参考第 4 节的长上下文技术）
+
+---
+
+## 8. 本章小结与全教程总结
 
 本章作为教程的最终章，覆盖了 LLM 领域最前沿的三个研究方向：
 
@@ -1016,6 +1478,59 @@ loss.backward()
 
 > **进阶内容请参见 [advanced.md](./advanced.md)**，深入探讨 Anthropic 的可解释性研究路线图、Google 和 DeepSeek 的前沿探索，以及世界模型、Model Merging 等最新话题。
 
+### 全教程总结与展望
+
+至此，我们已经完成了从模块 0 到模块 16 的完整学习路径。让我们回顾这段旅程：
+
+```mermaid
+graph LR
+    subgraph "基础构建 (模块 0-3)"
+        M0["0: 绪论"] --> M1["1: Tokenization"]
+        M1 --> M2["2: Embedding"]
+        M2 --> M3["3: Transformer"]
+    end
+
+    subgraph "核心深化 (模块 4-7)"
+        M3 --> M4["4: Decoder-Only"]
+        M4 --> M5["5: 注意力变体"]
+        M5 --> M6["6: FFN/MoE"]
+        M6 --> M7["7: 归一化/激活"]
+    end
+
+    subgraph "训练与对齐 (模块 8-12)"
+        M7 --> M8["8: 预训练"]
+        M8 --> M9["9: SFT"]
+        M9 --> M10["10: 评估"]
+        M10 --> M11["11: RLHF"]
+        M11 --> M12["12: DPO"]
+    end
+
+    subgraph "应用前沿 (模块 13-16)"
+        M12 --> M13["13: CoT 推理"]
+        M13 --> M14["14: 推理加速"]
+        M14 --> M15["15: RAG"]
+        M15 --> M16["16: 前沿专题"]
+    end
+
+    M16 --> FP["终极项目<br/>(final_project/)"]
+
+    style M0 fill:#e3f2fd
+    style M16 fill:#ff9800,color:#fff
+    style FP fill:#4caf50,color:#fff
+```
+
+**每个环节如何环环相扣**：
+
+- **Tokenization（模块 1）→ Embedding（模块 2）**：文本必须先被切分为 token，再映射到连续向量空间，才能被神经网络处理
+- **Transformer（模块 3）→ Decoder-Only（模块 4）→ 注意力变体（模块 5）**：从基础架构到工业级优化，逐层深入理解 LLM 的"骨架"
+- **预训练（模块 8）→ SFT（模块 9）→ RLHF/DPO（模块 11-12）**：三阶段训练范式是当前所有主流 LLM 的标准流程
+- **CoT 推理（模块 13）→ Agent（模块 16）**：从让模型"思考"到让模型"行动"，是 LLM 应用的自然演进
+- **可解释性 + 安全（模块 16）**：贯穿所有阶段的核心关切——我们必须理解并控制我们创造的系统
+
+**终极项目**：`final_project/` 目录包含一个综合性项目，要求你运用从 tokenization 到 Agent 的全部知识，从零构建一个完整的 LLM 应用系统。这是对 17 个模块学习成果的综合检验。
+
+**LLM 领域展望**：LLM 技术正在以前所未有的速度演进。多模态理解与生成的统一、Agent 系统的可靠性与安全性、以及对模型内部机制的深入理解，是当前最受关注的三个方向。作为这个领域的学习者和未来的从业者，保持对基础原理的深入理解、对前沿进展的持续关注、以及对技术伦理的严肃思考，将是你最重要的能力。
+
 ---
 
 ## 参考文献
@@ -1030,3 +1545,6 @@ loss.backward()
 8. Olsson, C., et al. (2022). "In-context Learning and Induction Heads." Anthropic.
 9. Conmy, A., et al. (2023). "Towards Automated Circuit Discovery for Mechanistic Interpretability."
 10. Perez, E., et al. (2022). "Red Teaming Language Models with Language Models."
+11. Anthropic (2024). "Model Context Protocol (MCP) Specification."
+12. Liu, S., et al. (2023). "LLM-based Agents: A Survey of Current Approaches and Challenges."
+13. Liu, Z., et al. (2024). "Lost in the Middle: How Language Models Use Long Contexts."
