@@ -1,20 +1,40 @@
 # 模块14：推理加速 — KV Cache / 量化 / 系统优化
 
-> 训练大语言模型的成本巨大，但**推理成本才是长期运营的主要开支**。一个 70B 参数的模型，每生成一个 token 都需要读取上百 GB 的权重和缓存数据。本章将系统剖析 LLM 推理的性能瓶颈，并介绍 KV Cache、量化、Flash Attention、投机解码等核心优化技术，帮助你理解如何将推理速度提升数倍乃至数十倍。
+> **章节定位**：推理加速是 LLM 从实验室走向生产的关键环节。在前面的学习中，我们已经完成了模型的预训练（Module 8-10）、微调对齐（Module 11-12）以及评估（Module 13）。但一个训练好的模型要真正服务于用户，还必须解决推理效率问题——**推理成本才是长期运营的主要开支**。本章系统剖析 LLM 推理的性能瓶颈，介绍 KV Cache、量化、Flash Attention、投机解码、Prefix Caching 等核心优化技术。掌握这些知识后，你将具备进入 Module 15（RAG 检索增强生成）和 Module 16（前沿话题）的基础，也为理解实际部署中的工程决策打下根基。
+
+```mermaid
+graph LR
+    M5["Module 5<br/>注意力机制<br/>(KV Cache 基础)"] -.->|"知识依赖"| M14
+    M12["Module 12<br/>RLHF / DPO<br/>(对齐训练完成)"] --> M14["**Module 14**<br/>**推理加速**<br/>KV Cache / 量化 / 系统优化"]
+    M13["Module 13<br/>评估<br/>(模型质量保证)"] --> M14
+    M14 --> M15["Module 15<br/>RAG<br/>(检索增强生成)"]
+    M14 --> M16["Module 16<br/>前沿话题<br/>(部署与未来)"]
+
+    style M14 fill:#e3f2fd,stroke:#1565c0,stroke-width:3px
+    style M5 fill:#f3e5f5,stroke:#7b1fa2,stroke-dasharray:5
+    style M12 fill:#e8f5e9
+    style M13 fill:#e8f5e9
+    style M15 fill:#fff3e0
+    style M16 fill:#fff3e0
+```
+
+> 一个 70B 参数的模型，每生成一个 token 都需要读取上百 GB 的权重和缓存数据。本章将帮助你理解如何将推理速度提升数倍乃至数十倍，同时保持模型质量。
 
 ---
 
 ## 目录
 
 - [1. LLM 推理的性能瓶颈](#1-llm-推理的性能瓶颈)
-- [2. KV Cache](#2-kv-cache)
-- [3. PagedAttention 与 vLLM](#3-pagedattention-与-vllm)
-- [4. 模型量化](#4-模型量化)
-- [5. Flash Attention](#5-flash-attention)
-- [6. 推理系统优化](#6-推理系统优化)
-- [7. 三条技术线的推理实践](#7-三条技术线的推理实践)
-- [8. 项目实践](#8-项目实践)
-- [9. 本章小结](#9-本章小结)
+- [2. 推理系统全景](#2-推理系统全景)
+- [3. KV Cache](#3-kv-cache)
+- [4. PagedAttention 与 vLLM](#4-pagedattention-与-vllm)
+- [5. 模型量化](#5-模型量化)
+- [6. Flash Attention](#6-flash-attention)
+- [7. 推理系统优化](#7-推理系统优化)
+- [8. Prefix Caching 与 Prompt Caching](#8-prefix-caching-与-prompt-caching)
+- [9. 三条技术线的推理实践](#9-三条技术线的推理实践)
+- [10. 项目实践](#10-项目实践)
+- [11. 本章小结](#11-本章小结)
 
 ---
 
@@ -146,9 +166,171 @@ $$T_{total} = T_{prefill} + T_{decode} \times N_{output}$$
 
 ---
 
-## 2. KV Cache
+## 2. 推理系统全景
 
-### 2.1 为什么需要 KV Cache？
+在深入各项具体优化技术之前，我们先建立对 LLM 推理系统的全局认知。一个生产级的 LLM 推理系统不仅仅是"加载模型 + 生成 token"，而是一个包含请求调度、显存管理、计算优化、缓存策略的复杂工程系统。
+
+### 2.1 推理系统的分层架构
+
+一个完整的 LLM 推理系统可以分为以下层次：
+
+```mermaid
+graph TB
+    subgraph "应用层"
+        API["API 网关<br/>负载均衡 / 鉴权 / 限流"]
+    end
+
+    subgraph "调度层"
+        SCHED["请求调度器<br/>Continuous Batching / 优先级 / 抢占"]
+    end
+
+    subgraph "缓存层"
+        KV["KV Cache 管理器<br/>PagedAttention / 分块分配"]
+        PC["Prefix Cache<br/>公共前缀复用"]
+    end
+
+    subgraph "计算层"
+        FA["Flash Attention<br/>分块注意力计算"]
+        QUANT["量化推理引擎<br/>INT4/INT8/FP8 计算"]
+        SD["投机解码<br/>小模型草稿 + 大模型验证"]
+    end
+
+    subgraph "硬件层"
+        GPU["GPU<br/>HBM / SRAM / Tensor Core"]
+    end
+
+    API --> SCHED
+    SCHED --> KV
+    SCHED --> PC
+    KV --> FA
+    KV --> QUANT
+    SCHED --> SD
+    FA --> GPU
+    QUANT --> GPU
+    SD --> GPU
+
+    style API fill:#fff3e0
+    style SCHED fill:#e3f2fd
+    style KV fill:#e8f5e9
+    style PC fill:#e8f5e9
+    style FA fill:#f3e5f5
+    style QUANT fill:#f3e5f5
+    style SD fill:#f3e5f5
+    style GPU fill:#ffcdd2
+```
+
+### 2.2 Prefill 与 Decode 的深度对比
+
+在第 1 节中我们已经介绍了 Prefill 和 Decode 两个阶段的基本概念。这里我们从**硬件利用率**的角度进一步分析。
+
+**Prefill 阶段的计算分析**：
+
+假设输入 prompt 有 $N$ 个 token，模型有 $L$ 层，每层包含一个自注意力模块和一个 FFN 模块。
+
+- 自注意力的计算量：$4Nd_{model}^2$（Q/K/V/O 四个线性投影）+ $2N^2 d_{model}$（注意力矩阵计算）
+- FFN 的计算量：$16Nd_{model}^2$（假设 FFN 隐层维度为 $4d_{model}$）
+- 每层总计：$\approx 20Nd_{model}^2 + 2N^2 d_{model}$
+
+当 $N$ 较大时（如 $N > 1000$），大矩阵乘法可以充分利用 GPU 的 Tensor Core，算力利用率可达 **60-80%**。
+
+**Decode 阶段的计算分析**：
+
+每步仅处理 1 个新 token（$N=1$），但需要与缓存中的 $S$ 个 token 做注意力：
+
+- 线性投影：$4 \times 1 \times d_{model}^2 = 4d_{model}^2$（矩阵-向量乘法）
+- 注意力计算：$2 \times S \times d_{model}$（向量与矩阵相乘）
+- FFN：$16d_{model}^2$
+
+关键瓶颈：**线性投影和 FFN 都是矩阵-向量乘法**，需要从 HBM 读取整个权重矩阵，但只做极少量的计算。以 Llama 2 70B 为例：
+
+$$\text{每步需读取的权重} \approx 70B \times 2 \text{ bytes (FP16)} = 140 \text{ GB}$$
+
+$$\text{每步的计算量} \approx 140 \text{ GFLOPs}$$
+
+$$\text{实际算术强度} = \frac{140 \text{ GFLOPs}}{140 \text{ GB}} = 1 \text{ FLOP/Byte}$$
+
+而 A100 的拐点算术强度为 156 FLOP/Byte。这意味着 Decode 阶段 **GPU 算力的 99.4% 处于空闲状态**，性能完全受限于内存带宽。
+
+**Prefill-Decode 分离（Disaggregated Serving）**：
+
+正是因为两个阶段的资源需求完全不同，前沿推理系统开始探索**分离架构**：
+
+| 策略 | Prefill 节点 | Decode 节点 |
+|------|-------------|-------------|
+| 硬件选择 | 高算力 GPU（如 H100 SXM） | 高带宽 GPU 或定制加速器 |
+| batch 策略 | 大 batch（充分利用算力） | 小 batch（降低延迟） |
+| 优化重点 | 计算效率 | 内存带宽效率 |
+| 典型系统 | Splitwise, DistServe | Splitwise, DistServe |
+
+这种分离架构可以让每类节点专注于自己擅长的计算模式，整体吞吐量可提升 **1.4-2.0 倍**。
+
+### 2.3 Continuous Batching 的本质
+
+为什么 Continuous Batching 如此重要？让我们从 GPU 利用率的数学视角来理解。
+
+**Static Batching 的浪费根源**：
+
+假设 batch 中有 4 个请求，生成长度分别为 50、200、80、150 tokens。在 Static Batching 下：
+
+```
+时间轴 (step) →
+请求 A: ████████████████████████████████████████░░░░░░░░░░░░░░░  (50/200 有效)
+请求 B: ████████████████████████████████████████████████████████  (200/200 有效)
+请求 C: ████████████████████████████████████████████░░░░░░░░░░░  (80/200 有效)
+请求 D: ████████████████████████████████████████████████████░░░  (150/200 有效)
+
+GPU 利用率 = (50 + 200 + 80 + 150) / (4 × 200) = 60%
+```
+
+**Continuous Batching 的核心机制**：
+
+Continuous Batching 在每一个 Decode step 进行**细粒度调度**：
+
+```mermaid
+sequenceDiagram
+    participant Q as 等待队列
+    participant S as 调度器
+    participant B as GPU Batch
+
+    Note over B: Step 1: Batch = {A, B, C, D}
+    B->>B: A, B, C, D 各生成 1 token
+
+    Note over B: Step 50: A 完成 (EOS)
+    B->>S: A 完成，释放 slot
+    Q->>S: 新请求 E 加入
+    S->>B: E 取代 A 的 slot
+
+    Note over B: Step 80: C 完成 (EOS)
+    B->>S: C 完成，释放 slot
+    Q->>S: 新请求 F 加入
+    S->>B: F 取代 C 的 slot
+
+    Note over B: 全程 batch 保持满载
+```
+
+**迭代级调度（Iteration-level Scheduling）**：
+
+与 Static Batching 的"请求级调度"不同，Continuous Batching 在**每个 Decode 迭代**做出调度决策：
+
+1. 检查哪些请求已经完成（生成了 EOS 或达到最大长度）
+2. 将完成的请求从 batch 中移除，立即释放其 KV Cache 占用的显存块
+3. 从等待队列中选择新请求填入空缺位置
+4. 新请求先执行 Prefill（可以与其他请求的 Decode 并行），然后加入 Decode 循环
+
+**吞吐量的理论分析**：
+
+设请求到达率为 $\lambda$（请求/秒），平均服务时间为 $\bar{T}$（秒），batch 容量为 $B$：
+
+- Static Batching 吞吐量上限：$\frac{B}{\max(T_1, \ldots, T_B)}$（受最慢请求限制）
+- Continuous Batching 吞吐量上限：$\frac{B}{\bar{T}}$（趋近平均服务时间的倒数）
+
+当请求长度方差较大时（实际场景的常态），Continuous Batching 的优势尤为显著。
+
+---
+
+## 3. KV Cache
+
+### 3.1 为什么需要 KV Cache？
 
 回顾自注意力的计算：
 
@@ -199,7 +381,7 @@ graph TB
     style B3 fill:#c8e6c9
 ```
 
-### 2.2 KV Cache 的显存计算
+### 3.2 KV Cache 的显存计算
 
 KV Cache 的显存开销是推理系统中最关键的瓶颈之一。下面推导其精确公式。
 
@@ -244,9 +426,9 @@ $$M_{KV} = 2 \times 80 \times 8192 \times 4096 \times 1 \times 2 = 10.7 \text{ G
 
 可见，GQA 和 MQA 通过减少 KV 头数，显著降低了 KV Cache 的显存开销。DeepSeek 的 MLA 更进一步，通过低秩压缩将 KV Cache 压缩到极致。
 
-### 2.3 KV Cache 的管理策略
+### 3.3 KV Cache 的管理策略
 
-#### 2.3.1 预分配策略
+#### 3.3.1 预分配策略
 
 **做法**：在推理开始前，按照最大序列长度一次性分配所有 KV Cache 显存。
 
@@ -267,7 +449,7 @@ v_cache = torch.zeros(batch_size, n_kv_heads, max_seq_len, head_dim,
 - 按最大长度分配，短序列浪费大量显存
 - batch 内不同请求的实际长度可能差异很大
 
-#### 2.3.2 动态增长策略
+#### 3.3.2 动态增长策略
 
 **做法**：KV Cache 初始分配较小，随着序列增长动态扩展。
 
@@ -281,7 +463,7 @@ v_cache = torch.cat([v_cache, new_v], dim=2)
 
 **缺点**：频繁的内存分配和数据拷贝，可能导致碎片和性能下降
 
-#### 2.3.3 混合策略：分块预分配
+#### 3.3.3 混合策略：分块预分配
 
 实际系统中常采用折中方案：按固定块大小（如 256 tokens）预分配，用完后再分配新块。
 
@@ -302,9 +484,9 @@ if seq_len > current_capacity:
 
 ---
 
-## 3. PagedAttention 与 vLLM
+## 4. PagedAttention 与 vLLM
 
-### 3.1 传统 KV Cache 管理的问题
+### 4.1 传统 KV Cache 管理的问题
 
 传统方式按每个请求的**最大可能长度**预分配连续的 KV Cache 显存，导致三大问题：
 
@@ -314,7 +496,7 @@ if seq_len > current_capacity:
 
 **类比**：这就像操作系统早期的**连续内存分配**——每个进程独占一段连续内存，造成严重浪费。
 
-### 3.2 PagedAttention：操作系统级的灵感
+### 4.2 PagedAttention：操作系统级的灵感
 
 PagedAttention 借鉴了操作系统的**虚拟内存与分页机制**，将 KV Cache 管理方式从连续分配改为分页分配。
 
@@ -363,7 +545,7 @@ graph TB
 
 $$\text{Block} \in \mathbb{R}^{n_{kv\_heads} \times \text{block\_size} \times d_h}$$
 
-### 3.3 分页管理的工作流程
+### 4.3 分页管理的工作流程
 
 ```mermaid
 sequenceDiagram
@@ -405,7 +587,7 @@ Token 8-9  → 物理块 8（仅填充 2/4 slots）
 
 注意力计算时，通过 Block Table 索引到物理块，无需连续内存。
 
-### 3.4 显存碎片消除
+### 4.4 显存碎片消除
 
 PagedAttention 的分页机制带来了显著的碎片消除效果：
 
@@ -414,7 +596,7 @@ PagedAttention 的分页机制带来了显著的碎片消除效果：
 
 根据 vLLM 论文的测量，PagedAttention 将 KV Cache 的有效显存利用率从约 20-40% 提升到接近 **100%**（仅有 <4% 的内部碎片）。
 
-### 3.5 Continuous Batching
+### 4.5 Continuous Batching
 
 传统的 **Static Batching** 中，batch 内所有请求必须同时开始、同时结束。这意味着：
 - 短请求被迫等待长请求完成
@@ -468,11 +650,11 @@ vLLM 的实验表明，Continuous Batching 可以将吞吐量提升 **2-4 倍**�
 
 ---
 
-## 4. 模型量化
+## 5. 模型量化
 
-### 4.1 量化基础
+### 5.1 量化基础
 
-#### 4.1.1 什么是量化？
+#### 5.1.1 什么是量化？
 
 量化是将模型权重和/或激活从高精度浮点数（如 FP16）映射到低精度整数（如 INT8、INT4）的过程。
 
@@ -481,7 +663,7 @@ vLLM 的实验表明，Continuous Batching 可以将吞吐量提升 **2-4 倍**�
 - **加速推理**：INT8/INT4 运算比 FP16 更快（硬件支持）
 - **降低显存**：权重 + KV Cache 显存的减少使更大模型可在更小 GPU 上运行
 
-#### 4.1.2 线性量化
+#### 5.1.2 线性量化
 
 线性量化将连续的浮点数映射到离散的整数值：
 
@@ -497,7 +679,7 @@ $$\boxed{x_q = \text{round}\left(\frac{x}{s}\right) + z}$$
 
 $$\hat{x} = s \cdot (x_q - z)$$
 
-#### 4.1.3 对称量化 vs 非对称量化
+#### 5.1.3 对称量化 vs 非对称量化
 
 **对称量化**（Symmetric）：零点 $z = 0$，浮点数 0 精确映射到整数 0。
 
@@ -533,7 +715,7 @@ graph LR
 - 权重分布通常以 0 为中心 → 对称量化
 - 激活值（如 ReLU 后）可能非负 → 非对称量化更合适
 
-#### 4.1.4 量化粒度
+#### 5.1.4 量化粒度
 
 量化粒度决定了多少个参数**共享同一组** scale 和 zero point：
 
@@ -546,7 +728,7 @@ graph LR
 
 现代 LLM 量化通常使用 **Per-group** 量化（group size=128），在精度和效率之间取得平衡。
 
-#### 4.1.5 量化误差分析
+#### 5.1.5 量化误差分析
 
 量化引入的误差来源于 round 操作。对于均匀分布的量化误差，可以建模为加性噪声：
 
@@ -561,9 +743,9 @@ $$\mathbb{E}[\epsilon^2] = \frac{s^2}{12}$$
 - 数值范围越大的张量，量化误差越大
 - **离群值（outliers）** 会显著增大 $s$，导致大部分正常值的量化精度下降
 
-### 4.2 GPTQ：基于 Hessian 的逐层量化
+### 5.2 GPTQ：基于 Hessian 的逐层量化
 
-#### 4.2.1 从 OBQ 到 GPTQ
+#### 5.2.1 从 OBQ 到 GPTQ
 
 GPTQ 的核心思想是：**量化不是简单地 round 每个权重，而是在量化一个权重后，调整未量化的权重来补偿量化误差**。
 
@@ -583,7 +765,7 @@ $$\delta_F = -\frac{w_q - \text{quant}(w_q)}{[H_F^{-1}]_{qq}} \cdot (H_F^{-1})_{
 
 其中 $F$ 是尚未量化的权重集合，$q$ 是当前量化的权重索引。
 
-#### 4.2.2 GPTQ 的关键加速
+#### 5.2.2 GPTQ 的关键加速
 
 OBQ 的复杂度为 $O(d_{row} \cdot d_{col}^3)$，对大模型不可行。GPTQ 做了两个关键改进：
 
@@ -609,9 +791,9 @@ OBQ 的复杂度为 $O(d_{row} \cdot d_{col}^3)$，对大模型不可行。GPTQ 
 
 GPTQ 的复杂度降为 $O(d_{row} \cdot d_{col}^2)$，可在单 GPU 上数小时内量化 175B 模型。
 
-### 4.3 AWQ：激活感知的权重量化
+### 5.3 AWQ：激活感知的权重量化
 
-#### 4.3.1 核心洞察：不是所有权重都同等重要
+#### 5.3.1 核心洞察：不是所有权重都同等重要
 
 AWQ（Activation-aware Weight Quantization）的关键观察是：**权重的重要性由其对应的激活值大小决定**。
 
@@ -619,7 +801,7 @@ $$\text{Output} = W \cdot X \quad \Rightarrow \quad \text{error}_j \propto |w_j|
 
 即使一个权重值很小，如果其对应的激活值很大，量化该权重也会导致显著的输出误差。
 
-#### 4.3.2 等效缩放变换
+#### 5.3.2 等效缩放变换
 
 AWQ 的巧妙之处在于：不直接对权重做不均匀量化（这会改变量化格式），而是通过**等效变换**间接保护重要权重。
 
@@ -639,9 +821,9 @@ $$s_j^* = \left(\frac{\max(|x_j|)}{\max(|w_j|)}\right)^{\alpha}$$
 
 其中 $\alpha \in [0, 1]$ 是一个需要在校准数据上搜索的超参数（AWQ 论文中 $\alpha = 0.5$ 表现最佳）。
 
-### 4.4 INT4 / INT8 / FP8 量化实践
+### 5.4 INT4 / INT8 / FP8 量化实践
 
-#### 4.4.1 各精度的特点
+#### 5.4.1 各精度的特点
 
 | 精度 | 位宽 | 动态范围 | 精度损失 | 推理加速 | 适用场景 |
 |------|------|----------|----------|----------|----------|
@@ -652,7 +834,7 @@ $$s_j^* = \left(\frac{\max(|x_j|)}{\max(|w_j|)}\right)^{\alpha}$$
 | INT8 | 8 bit | 中 | 小 | ~2-3x | 通用量化推理 |
 | INT4 | 4 bit | 低 | 中等 | ~3-4x | 极致压缩 |
 
-#### 4.4.2 量化对模型质量的影响
+#### 5.4.2 量化对模型质量的影响
 
 以 Llama 2 70B 在各种基准上的表现为参考（数据为近似趋势）：
 
@@ -672,9 +854,9 @@ $$s_j^* = \left(\frac{\max(|x_j|)}{\max(|w_j|)}\right)^{\alpha}$$
 
 ---
 
-## 5. Flash Attention
+## 6. Flash Attention
 
-### 5.1 标准 Attention 的显存瓶颈
+### 6.1 标准 Attention 的显存瓶颈
 
 标准 Attention 的计算过程：
 
@@ -701,7 +883,7 @@ $$128K \times 128K \times 2 \text{ bytes} = 32 \text{ GB}$$
 
 当 $N \gg d$ 时（长序列场景），$O(N^2)$ 的 HBM 访问成为瓶颈。
 
-### 5.2 分块计算（Tiling）的核心思想
+### 6.2 分块计算（Tiling）的核心思想
 
 Flash Attention 的核心思想是：**不在 HBM 中实例化完整的 $N \times N$ 注意力矩阵，而是在 SRAM（片上快速存储）中分块计算注意力**。
 
@@ -732,7 +914,7 @@ graph TB
 3. 使用在线 softmax 算法更新局部结果
 4. 处理完所有 $K, V$ 块后，将最终结果 $O_i$ 写回 HBM
 
-### 5.3 在线 Softmax 的数学技巧
+### 6.3 在线 Softmax 的数学技巧
 
 Flash Attention 的关键难点在于：softmax 需要全局归一化，但分块计算时每次只能看到部分数据。
 
@@ -768,7 +950,7 @@ $$O_i = \text{diag}\left(\ell_i^{(T_c)}\right)^{-1} \cdot O_i^{(T_c)}$$
 
 **数值稳定性**：通过始终减去当前最大值 $m_i^{(j)}$，避免了 $e^{x}$ 在 $x$ 很大时的数值溢出。
 
-### 5.4 IO 复杂度的改进
+### 6.4 IO 复杂度的改进
 
 **Flash Attention 的 HBM 访问量**：
 
@@ -804,11 +986,11 @@ $$\boxed{\Theta\left(\frac{N^2 d^2}{M}\right)}$$
 
 ---
 
-## 6. 推理系统优化
+## 7. 推理系统优化
 
-### 6.1 Speculative Decoding（投机解码）
+### 7.1 Speculative Decoding（投机解码）
 
-#### 6.1.1 核心思想
+#### 7.1.1 核心思想
 
 Decode 阶段的瓶颈在于**每步只生成一个 token**，GPU 大量算力闲置。投机解码的思路是：
 
@@ -835,7 +1017,7 @@ graph TB
     style F1 fill:#e3f2fd
 ```
 
-#### 6.1.2 算法细节
+#### 7.1.2 算法细节
 
 设大模型分布为 $p(x)$，草稿模型分布为 $q(x)$。
 
@@ -861,7 +1043,7 @@ $$x_t \sim \text{norm}\left(\max(0, p(x) - q(x))\right)$$
 
 其中 $\text{norm}$ 表示归一化为概率分布。
 
-#### 6.1.3 正确性的数学保证
+#### 7.1.3 正确性的数学保证
 
 投机解码的关键性质是：**最终输出的分布与纯大模型采样的分布完全一致**。
 
@@ -879,7 +1061,7 @@ $$P(\text{reject}) = \sum_{x'} q(x') \cdot \max\left(0, 1 - \frac{p(x')}{q(x')}\
 
 因此投机解码**不会引入任何额外偏差**，生成质量与纯大模型完全一致。
 
-#### 6.1.4 加速分析
+#### 7.1.4 加速分析
 
 设草稿模型的接受率为 $\alpha$（即平均每个猜测 token 被接受的概率）。
 
@@ -897,7 +1079,46 @@ $$\text{Speedup}_{ideal} = \frac{1 - \alpha^{\gamma+1}}{1 - \alpha}$$
 
 **实际效果参考**：当 $\alpha \approx 0.7$，$\gamma = 5$ 时，加速比约 $2\text{-}3\times$。
 
-### 6.2 Continuous Batching 的工程实现
+#### 7.1.5 草稿模型的选择与变体
+
+投机解码的加速效果高度依赖草稿模型的**接受率 $\alpha$**，而接受率取决于草稿模型与目标模型的分布相似度。草稿模型的选择是一个关键的工程决策。
+
+**草稿模型选择策略**：
+
+| 策略 | 描述 | 接受率 | 草稿速度 | 适用场景 |
+|------|------|--------|----------|----------|
+| 同系列小模型 | 如 Llama-70B + Llama-7B | 高 (~0.7-0.8) | 中 | 有同系列模型时首选 |
+| 蒸馏模型 | 从目标模型蒸馏的轻量模型 | 最高 (~0.8-0.9) | 中 | 愿意投入蒸馏成本时 |
+| N-gram 模型 | 基于 n-gram 统计的查找表 | 低 (~0.3-0.5) | 极快 | 超低延迟场景 |
+| 模型自身浅层 | 用模型前几层 + 小 LM Head | 中 (~0.5-0.7) | 快 | 不想加载额外模型 |
+| Medusa Head | 目标模型上添加多个预测头 | 中 (~0.5-0.7) | 快 | 单模型方案 |
+
+**接受率与加速比的关系**（$\gamma = 5$）：
+
+| 接受率 $\alpha$ | 期望 token/轮 | 理想加速比 | 考虑草稿开销后 |
+|----------------|--------------|-----------|---------------|
+| 0.5 | 1.97 | 1.97x | ~1.5x |
+| 0.6 | 2.42 | 2.42x | ~1.9x |
+| 0.7 | 3.00 | 3.00x | ~2.4x |
+| 0.8 | 3.78 | 3.78x | ~3.0x |
+| 0.9 | 4.69 | 4.69x | ~3.8x |
+
+**投机解码的实际开销**：
+
+草稿模型并非"免费的午餐"。完整的加速比需要考虑：
+
+$$\text{Speedup}_{real} = \frac{\mathbb{E}[\text{tokens per round}]}{1 + \frac{T_{draft} \times \gamma}{T_{target}}}$$
+
+其中 $T_{draft}$ 和 $T_{target}$ 分别是草稿模型和目标模型的单步推理时间。当 $T_{draft} / T_{target}$ 越小（草稿模型越快），实际加速比越接近理想值。
+
+**投机解码的变体**：
+
+1. **Staged Speculative Decoding**：使用多级草稿（如 n-gram -> 小模型 -> 大模型），逐级验证，进一步提升效率
+2. **Medusa**：在目标模型上训练多个额外的预测头，每个头独立预测未来第 $k$ 个 token，无需额外的草稿模型
+3. **Eagle**：利用目标模型的特征层（而非输出 logits）来训练轻量级的自回归草稿头，接受率高于 Medusa
+4. **Self-Speculative Decoding**：使用目标模型自身的浅层（跳过部分层）作为草稿模型，避免加载额外模型
+
+### 7.2 Continuous Batching 的工程实现
 
 Continuous Batching 的工程实现需要解决几个关键问题：
 
@@ -925,7 +1146,7 @@ graph TB
    - **Swap**：将被抢占请求的 KV Cache 移到 CPU 内存
    - **Recompute**：释放 KV Cache，恢复时重新计算
 
-### 6.3 前缀缓存（Prefix Caching）
+### 7.3 前缀缓存（Prefix Caching）
 
 许多实际应用中，不同请求共享相同的**系统提示（System Prompt）**。前缀缓存通过在请求间复用已计算的 KV Cache 来避免重复计算。
 
@@ -958,9 +1179,173 @@ graph TB
 
 ---
 
-## 7. 三条技术线的推理实践
+## 8. Prefix Caching 与 Prompt Caching
 
-### 7.1 Google 路线
+前缀缓存（Prefix Caching）是一种利用请求间公共前缀来避免重复计算的技术。随着 LLM 应用的成熟，这项技术已经从推理框架的内部优化上升为 **API 层面的产品特性**——以 Anthropic 和 Google 为代表，主流 LLM 提供商都推出了 Prompt Caching 功能。
+
+### 8.1 Prompt Caching 的工程动机
+
+在实际的 LLM 应用中，大量请求共享相同的前缀结构：
+
+| 应用场景 | 公共前缀内容 | 典型长度 | 每日请求量 |
+|---------|-------------|---------|----------|
+| 客服助手 | 系统提示 + 产品知识库 | 2K-10K tokens | 10K-100K |
+| 代码助手 | 系统提示 + 代码仓库上下文 | 5K-50K tokens | 1K-10K |
+| 文档问答 | 系统提示 + 文档内容 | 10K-100K tokens | 1K-50K |
+| 多轮对话 | 历史对话上下文 | 1K-20K tokens | 1K-100K |
+
+如果每次请求都重新计算这些前缀的 KV Cache，将造成巨大的计算浪费。以一个 10K token 的系统提示为例，使用 Llama 70B 模型，每次 Prefill 需要约 **2 秒**和 **140 TFLOPs** 的计算量。如果每天有 10K 个请求，总计浪费约 **5.5 小时**的 GPU 时间。
+
+### 8.2 Anthropic 的 Prompt Caching
+
+Anthropic 于 2024 年推出了 Claude 的 Prompt Caching 功能，这是业界最早将 KV Cache 复用作为 API 层产品特性的方案之一。
+
+**工作原理**：
+
+```mermaid
+graph TB
+    subgraph "首次请求"
+        A1["[系统提示 + 工具定义]<br/>标记为 cache_control"] --> B1["完整 Prefill<br/>计算并缓存 KV"]
+        B1 --> C1["用户消息 Prefill"]
+        C1 --> D1["Decode 生成回复"]
+    end
+
+    subgraph "后续请求（5分钟内）"
+        A2["[系统提示 + 工具定义]<br/>命中缓存"] --> B2["跳过 Prefill<br/>直接加载 KV Cache"]
+        B2 --> C2["仅计算用户消息 Prefill"]
+        C2 --> D2["Decode 生成回复"]
+    end
+
+    B1 -->|"缓存 KV Cache<br/>TTL=5min"| B2
+
+    style A1 fill:#e3f2fd
+    style B2 fill:#c8e6c9
+    style B1 fill:#fff3e0
+```
+
+**API 使用方式**（Claude Messages API）：
+
+```python
+# Anthropic Prompt Caching 示例
+response = client.messages.create(
+    model="claude-sonnet-4-20250514",
+    max_tokens=1024,
+    system=[
+        {
+            "type": "text",
+            "text": "你是一个专业的客服助手。以下是产品手册...[很长的文档]",
+            "cache_control": {"type": "ephemeral"}  # 标记此部分需要缓存
+        }
+    ],
+    messages=[
+        {"role": "user", "content": "这个产品的保修政策是什么？"}
+    ]
+)
+# 响应中包含缓存命中信息:
+# cache_creation_input_tokens: 首次缓存时计费
+# cache_read_input_tokens: 后续命中时以折扣价计费（约 1/10 价格）
+```
+
+**Anthropic Prompt Caching 的关键设计**：
+
+| 特性 | 说明 |
+|------|------|
+| 缓存粒度 | 消息块级别（system / tool / 前几轮对话） |
+| 缓存生命周期（TTL） | 5 分钟（无访问则过期） |
+| 最小缓存长度 | 1024 tokens（低于此不触发缓存） |
+| 定价策略 | 缓存写入: 1.25x 正常价格; 缓存读取: 0.1x 正常价格 |
+| 前缀匹配 | 精确前缀匹配（从头开始的连续 token 序列） |
+
+**成本节省分析**：
+
+假设一个客服系统，系统提示 5000 tokens，平均每个用户消息 200 tokens：
+
+$$\text{无缓存成本} = (5000 + 200) \times P_{input} = 5200 P_{input}$$
+
+$$\text{有缓存成本} = 5000 \times 0.1 P_{input} + 200 \times P_{input} = 700 P_{input}$$
+
+$$\text{节省比例} = 1 - \frac{700}{5200} = 86.5\%$$
+
+### 8.3 Google 的 Context Caching
+
+Google 的 Gemini API 也提供了类似的 Context Caching 功能，但设计理念有所不同。
+
+**与 Anthropic 的对比**：
+
+| 特性 | Anthropic Prompt Caching | Google Context Caching |
+|------|------------------------|----------------------|
+| 缓存创建方式 | 在请求中标记 `cache_control` | 通过专门的 API 预创建缓存对象 |
+| 缓存生命周期 | 5 分钟（自动续期） | 用户可指定（默认 1 小时，可达数天） |
+| 缓存管理 | 隐式管理（自动过期） | 显式管理（可列出、删除、更新 TTL） |
+| 最小缓存长度 | 1024 tokens | 32,768 tokens |
+| 存储成本 | 无额外存储费 | 按 token 数和存储时长计费 |
+| 适用场景 | 短期高频重复请求 | 长期大规模上下文复用 |
+
+**Google Context Caching 的使用方式**：
+
+```python
+# Google Gemini Context Caching 示例
+import google.generativeai as genai
+
+# Step 1: 创建缓存（独立操作）
+cache = genai.caching.CachedContent.create(
+    model="gemini-1.5-flash-001",
+    display_name="product-manual-cache",
+    system_instruction="你是一个专业的客服助手。",
+    contents=[
+        # 将大型文档作为缓存内容
+        genai.types.ContentDict(
+            role="user",
+            parts=[genai.types.PartDict(text="以下是完整的产品手册...[很长的文档]")]
+        )
+    ],
+    ttl=datetime.timedelta(hours=2),  # 显式设置缓存有效期
+)
+
+# Step 2: 使用缓存进行推理
+model = genai.GenerativeModel.from_cached_content(cache)
+response = model.generate_content("这个产品的保修政策是什么？")
+```
+
+### 8.4 Prefix Caching 的底层实现
+
+不论是 Anthropic 还是 Google 的产品化方案，底层都依赖于高效的 KV Cache 前缀匹配和存储机制。
+
+**基于 Radix Tree 的前缀匹配**（SGLang 的方案）：
+
+Radix Tree（基数树）是一种压缩的字典树，特别适合前缀匹配场景。在推理系统中，每个节点存储一段 token 序列及其对应的 KV Cache 块指针。
+
+```
+Radix Tree 结构:
+根节点
+  ├── [system_prompt_tokens_0..1023] → KV Block 0-3
+  │     ├── [tool_def_tokens_0..511] → KV Block 4-5
+  │     │     ├── [user_msg_A] → KV Block 6
+  │     │     └── [user_msg_B] → KV Block 7
+  │     └── [few_shot_examples] → KV Block 8-10
+  └── [another_system_prompt] → KV Block 11-13
+```
+
+**匹配过程**：
+1. 将新请求的 token 序列在 Radix Tree 中查找最长前缀匹配
+2. 匹配到的前缀对应的 KV Cache 块直接复用
+3. 仅对不匹配的后缀部分执行 Prefill 计算
+4. 新计算的 KV Cache 块插入 Radix Tree
+
+**缓存淘汰策略**：
+
+| 策略 | 原理 | 优点 | 缺点 |
+|------|------|------|------|
+| LRU（最近最少使用） | 淘汰最久未被访问的缓存 | 实现简单，通用性好 | 对突发流量不友好 |
+| LFU（最不经常使用） | 淘汰访问频率最低的缓存 | 保留高频缓存 | 对新缓存不友好 |
+| TTL（生存时间） | 缓存到期自动失效 | 可预测，适合 API 定价 | 可能淘汰仍有价值的缓存 |
+| 前缀感知 LRU | 优先保留更长的公共前缀 | 最大化缓存复用 | 实现复杂度较高 |
+
+---
+
+## 9. 三条技术线的推理实践
+
+### 9.1 Google 路线
 
 ```mermaid
 graph LR
@@ -983,7 +1368,7 @@ graph LR
 - 9B 模型：适合单 GPU 部署，INT8 量化后约 9 GB
 - 27B 模型：需要多 GPU 或 INT4 量化，GPTQ 量化后约 14 GB
 
-### 7.2 DeepSeek 路线
+### 9.2 DeepSeek 路线
 
 **MLA 对 KV Cache 的极致压缩**：
 
@@ -1018,7 +1403,7 @@ DeepSeek-V3 的推理成本约为同等质量稠密模型的 **1/5 至 1/10**，
 2. MoE 每 token 仅激活 ~3% 的参数，减少计算量
 3. 结合硬件优化（如 FP8 推理），进一步降低成本
 
-### 7.3 Anthropic 路线
+### 9.3 Anthropic 路线
 
 > 注：Anthropic 对 Claude 的推理系统细节公开较少，以下部分基于公开信息和合理推测。
 
@@ -1042,7 +1427,7 @@ DeepSeek-V3 的推理成本约为同等质量稠密模型的 **1/5 至 1/10**，
 
 ---
 
-## 8. 项目实践
+## 10. 项目实践
 
 ### 项目 1：实现 KV Cache 并测量加速效果（进阶 ⭐⭐）
 
@@ -1240,7 +1625,149 @@ graph TB
 
 ---
 
-## 9. 本章小结
+### 项目 5：推理加速基准测试 — Naive vs KV Cache vs 量化推理（进阶 ⭐⭐）
+
+**目标**：建立系统的推理性能基准测试框架，定量比较不同优化策略的速度和生成质量，培养"用数据说话"的工程素养。
+
+**背景**：在实际部署中，选择推理优化策略不是"越多越好"，而是需要在**速度、显存、质量**三者之间找到最优平衡点。本项目要求你动手构建 benchmark，亲眼看到各种优化的实际效果。
+
+**任务**：
+
+1. **实现三种推理模式**：
+   - **Naive 推理**：不使用 KV Cache，每步重新计算所有 token 的 KV（作为基线）
+   - **KV Cache 推理**：使用预分配 KV Cache 的标准推理（项目 1 的扩展）
+   - **量化 KV Cache 推理**：将模型权重量化为 INT8/INT4 后推理
+
+2. **设计 benchmark 矩阵**：
+
+   | 测试维度 | 取值 |
+   |---------|------|
+   | 推理模式 | Naive / KV Cache / INT8 量化 / INT4 量化 |
+   | 输入长度 | 64 / 256 / 1024 / 2048 tokens |
+   | 生成长度 | 64 / 128 / 256 tokens |
+   | 模型规模 | 小模型（如 GPT-2）/ 中模型（如 Llama-7B） |
+
+3. **采集性能指标**：
+   - **TTFT**（Time To First Token）：首 token 延迟
+   - **TPOT**（Time Per Output Token）：每 token 生成延迟
+   - **吞吐量**（tokens/second）：每秒生成的 token 数
+   - **峰值显存**（Peak GPU Memory）：推理过程中的最大显存占用
+
+4. **评估生成质量**：
+   - 使用 Perplexity 评估量化前后的语言模型质量
+   - 用 ROUGE / BLEU 评估量化模型与 FP16 模型的输出一致性
+   - 收集 10-20 个样例，人工比较量化前后的生成质量
+
+5. **可视化输出**：
+   - 绘制"输入长度 vs TTFT"曲线（对比各模式）
+   - 绘制"生成长度 vs 总延迟"曲线
+   - 绘制"量化精度 vs Perplexity"散点图
+   - 绘制"速度 vs 质量" Pareto 前沿图
+
+**提供的 benchmark 框架**：
+
+```python
+import time
+import torch
+from dataclasses import dataclass
+
+
+@dataclass
+class BenchmarkResult:
+    """基准测试结果"""
+    mode: str               # 推理模式名称
+    input_length: int        # 输入长度
+    output_length: int       # 生成长度
+    ttft_ms: float           # 首 token 延迟 (ms)
+    tpot_ms: float           # 每 token 延迟 (ms)
+    total_time_ms: float     # 总延迟 (ms)
+    throughput_tps: float    # 吞吐量 (tokens/s)
+    peak_memory_mb: float    # 峰值显存 (MB)
+    perplexity: float = None # 困惑度 (可选)
+
+
+def benchmark_generation(model, tokenizer, prompt_tokens, gen_length,
+                         mode="kv_cache", device="cuda"):
+    """
+    对单次生成进行 benchmark
+
+    参数:
+        model: 语言模型
+        tokenizer: 分词器
+        prompt_tokens: 输入 token ids
+        gen_length: 生成长度
+        mode: 推理模式 ("naive" / "kv_cache" / "int8" / "int4")
+        device: 设备
+
+    返回:
+        BenchmarkResult
+    """
+    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.synchronize()
+
+    # 测量 TTFT
+    start = time.perf_counter()
+    # ... 学生实现: 根据 mode 选择不同推理策略 ...
+    # first_token = generate_first_token(model, prompt_tokens, mode)
+    torch.cuda.synchronize()
+    ttft = (time.perf_counter() - start) * 1000  # ms
+
+    # 测量 Decode 阶段
+    decode_start = time.perf_counter()
+    # ... 学生实现: 逐 token 生成 ...
+    # for i in range(gen_length - 1):
+    #     next_token = generate_next_token(model, mode)
+    torch.cuda.synchronize()
+    decode_time = (time.perf_counter() - decode_start) * 1000  # ms
+
+    total_time = ttft + decode_time
+    tpot = decode_time / max(gen_length - 1, 1)
+    throughput = gen_length / (total_time / 1000)
+    peak_mem = torch.cuda.max_memory_allocated() / 1024 / 1024  # MB
+
+    return BenchmarkResult(
+        mode=mode,
+        input_length=len(prompt_tokens),
+        output_length=gen_length,
+        ttft_ms=ttft,
+        tpot_ms=tpot,
+        total_time_ms=total_time,
+        throughput_tps=throughput,
+        peak_memory_mb=peak_mem,
+    )
+
+
+def run_benchmark_suite(model, tokenizer, device="cuda"):
+    """运行完整的 benchmark 测试矩阵"""
+    results = []
+    input_lengths = [64, 256, 1024]
+    gen_lengths = [64, 128, 256]
+    modes = ["naive", "kv_cache"]  # 学生可扩展为 ["naive", "kv_cache", "int8", "int4"]
+
+    for mode in modes:
+        for in_len in input_lengths:
+            for gen_len in gen_lengths:
+                # 生成随机 prompt
+                prompt = torch.randint(0, tokenizer.vocab_size, (1, in_len)).to(device)
+                result = benchmark_generation(model, tokenizer, prompt, gen_len, mode, device)
+                results.append(result)
+                print(f"[{mode}] in={in_len}, out={gen_len}: "
+                      f"TTFT={result.ttft_ms:.1f}ms, TPOT={result.tpot_ms:.1f}ms, "
+                      f"Mem={result.peak_memory_mb:.0f}MB")
+
+    return results
+```
+
+**思考题**：
+- 为什么 Naive 推理在短序列时和 KV Cache 差距不大，但在长序列时差距急剧增大？
+- INT4 量化在哪些任务上质量下降最明显？为什么？
+- 如果你只有一块 RTX 3060（12 GB），你会如何选择推理策略来部署 Llama-7B？
+
+**参考实现**：见 `code/inference/benchmark_suite.py`
+
+---
+
+## 11. 本章小结
 
 ### 核心知识点回顾
 
@@ -1283,3 +1810,14 @@ graph TB
 - [AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration](https://arxiv.org/abs/2306.00978)
 - [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/abs/2211.17192)
 - [DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model](https://arxiv.org/abs/2405.04434)
+- [DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving](https://arxiv.org/abs/2401.09670)
+- [Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads](https://arxiv.org/abs/2401.10774)
+- [EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty](https://arxiv.org/abs/2401.15077)
+
+---
+
+## 下一步：Module 15 — RAG（检索增强生成）
+
+掌握了推理加速技术后，我们已经具备了高效部署 LLM 的能力。但在实际应用中，LLM 面临一个根本性挑战：**模型的知识冻结在训练数据的截止日期**。当用户提问涉及最新信息、私有数据或长尾知识时，纯粹依赖模型参数中的知识往往不够。
+
+Module 15 将介绍 **RAG（Retrieval-Augmented Generation，检索增强生成）** 技术，通过将外部知识库与 LLM 推理相结合，实现"知识可更新、来源可追溯"的智能问答。RAG 系统的性能同样依赖于本章所学的推理优化技术——高效的 Prefix Caching 可以加速重复文档上下文的处理，Continuous Batching 可以支撑高并发的检索+生成请求。推理加速与 RAG 的结合，将是 LLM 从"能用"走向"好用"的关键一步。
