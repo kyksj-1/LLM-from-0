@@ -29,6 +29,7 @@
 - [模块 14: 推理加速 — KV Cache/量化/系统优化](#模块-14-推理加速--kv-cache量化系统优化)
 - [模块 15: RAG 与知识增强 — 检索、向量库与 GraphRAG](#模块-15-rag-与-知识增强--检索向量库与-graphrag)
 - [模块 16: 前沿专题 — 可解释性/安全/多模态](#模块-16-前沿专题--可解释性安全多模态)
+- [模块 17(补充): Synthetic Data — 合成数据与自我进化](#模块-17补充-synthetic-data--合成数据与自我进化)
 - [终极项目: 从零训练一个完整 LLM](#终极项目-从零训练一个完整-llm)
 
 ---
@@ -1910,7 +1911,88 @@ code/advanced_topics/
 | 4   | 搭建一个简单的多模态 LLM               | ⭐⭐⭐ 挑战 | 架构设计思路 + 关键代码片段   | 理解多模态架构        |
 
 ---
+## 模块 17(补充): Synthetic Data — 合成数据与自我进化
 
+### README.md
+
+#### 1. 数据枯竭（Data Scarcity）与合成数据的崛起
+- 互联网高质量文本的耗尽预测（Villalobos et al. 2022）
+- **Model Collapse (模型坍塌)** 理论：
+  - 用 AI 生成的数据训练 AI 会导致分布收敛、方差丢失？
+  - 反直觉的发现：只要质量控制得当，合成数据能超越真实数据
+- "Textbooks Are All You Need" (Phi 系列) 的核心启示：
+  - 数据质量 > 数据数量
+  - 用大模型生成"教科书级"数据训练小模型
+
+#### 2. 数据生成策略
+- **Self-Instruct / Evol-Instruct**:
+  - 种子指令 → 变体生成（深度扩展、广度扩展） → 过滤
+  - WizardLM 的进化策略
+- **Back-translation (回译法)**:
+  - 类似于机器翻译中的回译
+  - Nemotron-4 的数据生成管线
+- **Rephrasing & Rewriting**:
+  - 风格迁移：将维基百科重写为问答对、代码注释、初中生读物
+- **Reasoning Chains Synthesis (DeepSeek-R1 风格)**:
+  - 利用强模型（或 RL 探索）生成 CoT 路径
+  - 过滤错误路径，保留正确且优雅的推导过程
+
+#### 3. 质量控制与过滤 (Quality Filtering)
+- **基于规则的过滤**: 长度、重复率、特殊字符
+- **基于模型的评分 (Reward Model)**:
+  - Deberta-v3-large 作为打分器
+  - 困惑度 (Perplexity) 过滤
+- **难度控制 (Difficulty Conditioned Generation)**:
+  - 确保合成数据的难度分布符合 Scaling Laws 需求
+
+#### 4. 自我进化 (Self-Evolution)
+- **Self-Play**: 模型自己出题，自己做，自己评
+- **SPIN (Self-Play Fine-Tuning)**:
+  - 将弱模型生成的响应作为负例，强模型（或自身早期版本）作为正例
+  - 这里的数学原理：通过对弈逼近目标分布
+
+### advanced.md
+
+#### 1. Google / DeepMind 的合成数据研究
+- AlphaCode 的数据生成策略
+- Gemini 训练中的合成数据配比
+
+#### 2. DeepSeek 的合成数据实践
+- DeepSeek-Math / Coder 的数据生成
+- DeepSeek-R1 的冷启动数据与 RL 生成数据的迭代循环
+- 如何防止"近亲繁殖"导致的能力退化
+
+#### 3. Anthropic 视角
+- Constitutional AI 中的 RLAIF (AI Feedback)
+- 合成数据在红队测试（Red Teaming）中的应用
+
+#### 4. 前沿话题
+- 数据飞轮（Data Flywheel）：模型越强 → 生成数据越好 → 模型更强
+- 多模态合成数据：生成图文对训练 VLM
+- 验证器（Verifier）在数据合成中的核心地位
+
+### 代码目录 `code/synthetic_data/`
+
+```
+code/synthetic_data/ 
+├── evol_instruct.py # Evol-Instruct 提示词工程与流程 
+├── quality_filter.py # 基于 LLM 打分的数据过滤器 
+├── self_play.py # 简化的 Self-Play 数据生成循环 
+├── textbook_generator.py # "教科书"风格重写工具 
+└── deduplication.py # 合成数据专用去重（语义级）
+```
+
+
+### 项目实践 
+| #   | 项目名称                          | 难度     | 提供内容               | 核心目标      |
+| --- | ----------------------------- | ------ | ------------------ | --------- |
+| 1   | 实现 Evol-Instruct 流程生成 100 条指令 | ⭐⭐ 进阶  | Prompt 模板 + 流程脚本   | 掌握指令进化    |
+| 2   | 使用小模型复现 Phi-1 的"教科书"数据生成      | ⭐⭐ 进阶  | 数据清洗脚本 + 生成 Prompt | 理解高质量数据构建 |
+| 3   | 构建一个 Self-Play 循环提升数学解题能力     | ⭐⭐⭐ 挑战 | 验证器逻辑 + 循环框架       | 掌握自我进化    |
+| 4   | 训练一个数据质量打分模型 (Reward Model)   | ⭐⭐⭐ 挑战 | 数据集构建思路 + 训练脚本     | 掌握数据筛选工程  |
+
+
+---
 ## 终极项目: 从零训练一个完整 LLM
 
 > 独立章节，位于 `final_project/` 目录
@@ -2039,7 +2121,7 @@ final_project/
 ```
 code/
 ├── tokenization/              # 模块 1
-│   ├── bpe_tokenizer.py       ✅ 已完成
+│   ├── bpe_tokenizer.py       
 │   ├── wordpiece_tokenizer.py
 │   ├── unigram_tokenizer.py
 │   ├── tokenizer_comparison.py
@@ -2165,13 +2247,19 @@ code/
 │   ├── graph_rag_basic.py
 │   ├── reranker.py
 │   └── rag_pipeline.py
-└── advanced_topics/           # 模块 16
-    ├── sparse_autoencoder.py
-    ├── feature_visualization.py
-    ├── activation_patching.py
-    ├── safety_evaluation.py
-    ├── multimodal_basic.py
-    └── function_calling.py
+├── advanced_topics/           # 模块 16
+│   ├── sparse_autoencoder.py
+│   ├── feature_visualization.py
+│   ├── activation_patching.py
+│   ├── safety_evaluation.py
+│   ├── multimodal_basic.py
+│   └── function_calling.py
+└── synthetic_data/            # 模块 17(补充)
+	├── evol_instruct.py        
+	├── quality_filter.py       
+	├── self_play.py  
+	├── textbook_generator.py  
+	└── deduplication.py                  
 ```
 
 ---

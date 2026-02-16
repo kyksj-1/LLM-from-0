@@ -39,6 +39,7 @@ LLM learning/
 ├── 14_inference/              # 模块14：推理加速（KV Cache/量化/vLLM）
 ├── 15_rag/                    # 模块15：RAG检索增强生成
 ├── 16_frontiers/              # 模块16：前沿专题（多模态/长上下文/Agent）
+├── 17_synthetic_data/         # 模块17(补充)：合成数据与自我进化
 ├── final_project/             # 终极项目：从零训练完整LLM
 ├── code/                      # 各模块代码实现
 └── assets/                    # 图片资源
@@ -103,27 +104,28 @@ pip install vllm auto-gptq autoawq
 
 ## 章节概览
 
-| 模块 | 主题 | 核心内容 | 工业界参考 |
-|------|------|----------|----------|
-| 00 | LLM全景图 | 发展历史、技术路线图、学习路径 | 全行业 |
-| 01 | Tokenization | BPE/WordPiece/Unigram | SentencePiece, Tiktoken |
-| 02 | Embedding | 词嵌入、RoPE/ALiBi/YaRN | Gemma, Llama |
-| 03 | Transformer | Self-Attention, FFN, LayerNorm | 原版Transformer |
-| 04 | Decoder-Only | GPT → Llama 架构演进 | GPT系列, Llama系列 |
-| 05 | 注意力变体 | GQA, MQA, MLA, Flash Attention | DeepSeek-MLA, PaLM |
-| 06 | MoE | 混合专家、路由策略、负载均衡 | DeepSeek-V2/V3, Mixtral |
-| 07 | 数据工程 | 采集、清洗、去重、质量评估 | C4, RefinedWeb, SlimPajama |
-| 08a | 预训练目标 | CLM, MLM, PrefixLM, UL2 | PaLM, T5, GPT |
-| 08b | 缩放定律 | Kaplan/Chinchilla Scaling Laws | Chinchilla, DeepSeek |
-| 08c | 训练工程 | 混合精度、梯度检查点、Optimizer | Megatron, PaLM |
-| 09 | 分布式训练 | 3D并行、ZeRO、FSDP | Megatron, DeepSpeed |
-| 10 | SFT | 指令微调、LoRA/QLoRA | Flan, Alpaca, LLaMA-Factory |
-| 11 | RLHF | 奖励模型、PPO、GRPO | InstructGPT, DeepSeek-R1 |
-| 12 | DPO | DPO/KTO/ORPO/SimPO | DeepSeek, Claude |
-| 13 | 推理与CoT | 思维链、自洽性、Test-Time Compute | DeepSeek-R1, o1/o3 |
-| 14 | 推理加速 | KV Cache, 量化(GPTQ/AWQ), 推理系统 | vLLM, llama.cpp, TensorRT-LLM |
-| 15 | RAG | 检索增强生成、向量数据库、评估 | Perplexity, Google Search |
-| 16 | 前沿专题 | 多模态、长上下文、Agent、安全对齐 | GPT-4V, Claude, Gemini |
+| 模块  | 主题           | 核心内容                           | 工业界参考                         |
+| --- | ------------ | ------------------------------ | ----------------------------- |
+| 00  | LLM全景图       | 发展历史、技术路线图、学习路径                | 全行业                           |
+| 01  | Tokenization | BPE/WordPiece/Unigram          | SentencePiece, Tiktoken       |
+| 02  | Embedding    | 词嵌入、RoPE/ALiBi/YaRN            | Gemma, Llama                  |
+| 03  | Transformer  | Self-Attention, FFN, LayerNorm | 原版Transformer                 |
+| 04  | Decoder-Only | GPT → Llama 架构演进               | GPT系列, Llama系列                |
+| 05  | 注意力变体        | GQA, MQA, MLA, Flash Attention | DeepSeek-MLA, PaLM            |
+| 06  | MoE          | 混合专家、路由策略、负载均衡                 | DeepSeek-V2/V3, Mixtral       |
+| 07  | 数据工程         | 采集、清洗、去重、质量评估                  | C4, RefinedWeb, SlimPajama    |
+| 08a | 预训练目标        | CLM, MLM, PrefixLM, UL2        | PaLM, T5, GPT                 |
+| 08b | 缩放定律         | Kaplan/Chinchilla Scaling Laws | Chinchilla, DeepSeek          |
+| 08c | 训练工程         | 混合精度、梯度检查点、Optimizer           | Megatron, PaLM                |
+| 09  | 分布式训练        | 3D并行、ZeRO、FSDP                 | Megatron, DeepSpeed           |
+| 10  | SFT          | 指令微调、LoRA/QLoRA                | Flan, Alpaca, LLaMA-Factory   |
+| 11  | RLHF         | 奖励模型、PPO、GRPO                  | InstructGPT, DeepSeek-R1      |
+| 12  | DPO          | DPO/KTO/ORPO/SimPO             | DeepSeek, Claude              |
+| 13  | 推理与CoT       | 思维链、自洽性、Test-Time Compute      | DeepSeek-R1, o1/o3            |
+| 14  | 推理加速         | KV Cache, 量化(GPTQ/AWQ), 推理系统   | vLLM, llama.cpp, TensorRT-LLM |
+| 15  | RAG          | 检索增强生成、向量数据库、评估                | Perplexity, Google Search     |
+| 16  | 前沿专题         | 多模态、长上下文、Agent、安全对齐            | GPT-4V, Claude, Gemini        |
+| 17  | 合成数据（补充）     | Self-Instruct/Evol-Instruct, 质量过滤, Self-Play | Phi, DeepSeek-R1, Constitutional AI |
 
 ---
 
