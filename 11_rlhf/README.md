@@ -4,6 +4,37 @@
 
 ---
 
+## 章节定位：RLHF 在 LLM 训练体系中的位置
+
+```mermaid
+graph LR
+    subgraph "预训练阶段"
+        A["模块 8: 预训练<br/>Next Token Prediction<br/>海量文本学习语言能力"]
+    end
+
+    subgraph "对齐三部曲"
+        B["模块 10: SFT<br/>监督微调<br/>学会'说话的格式'"]
+        C["模块 11: RLHF<br/>基于人类反馈的强化学习<br/>学会'说更好的话'"]
+        D["模块 12: DPO<br/>直接偏好优化<br/>简化版对齐方案"]
+    end
+
+    A -->|"基础能力"| B
+    B -->|"格式对齐"| C
+    C -.->|"简化替代"| D
+
+    style C fill:#fff9c4,stroke:#f9a825,stroke-width:3px
+    style B fill:#e3f2fd
+    style D fill:#e8f5e9
+```
+
+RLHF 处于 **"预训练 → SFT → 对齐"** 三阶段训练范式的最后一环。经过预训练后，模型具备了基础的语言能力；经过 SFT 后，模型学会了遵循指令的格式；而 RLHF 的目标，则是让模型的输出真正**符合人类的偏好和价值观**。
+
+**RLHF 的历史意义**：2022 年，OpenAI 发表的 **InstructGPT** 论文（Ouyang et al.）首次在工业级 LLM 上系统性地应用了 RLHF，将 GPT-3 从一个"能力强但难以控制"的基座模型，变成了一个"有帮助、安全、诚实"的对话助手。这篇论文开创了 **SFT → 奖励模型 → PPO 优化** 的标准三阶段流水线，直接奠定了 ChatGPT 的技术基础。而 RLHF 的理论基础则更早——2017 年 Christiano 等人（多位后来的 Anthropic 创始成员）在 NeurIPS 发表的奠基论文首次提出了从人类偏好中学习奖励函数的完整框架。
+
+> **本模块的学习路径**：先理解"为什么需要 RLHF"（第 1 节），再掌握奖励模型的训练（第 2 节），然后深入 PPO 的数学（第 3-4 节），了解工程挑战和工业实践（第 5-10 节），最后通过项目实践巩固理解。
+
+---
+
 ## 目录
 
 - [1. 为什么需要 RLHF](#1-为什么需要-rlhf)
@@ -13,8 +44,11 @@
 - [5. RLHF 的工程挑战](#5-rlhf-的工程挑战)
 - [6. Google 的 RLHF 实践](#6-google-的-rlhf-实践)
 - [7. DeepSeek 的 RLHF 实践](#7-deepseek-的-rlhf-实践)
-- [8. Anthropic 的 RLHF 贡献](#8-anthropic-的-rlhf-贡献)
-- [9. 项目实践](#9-项目实践)
+- [8. GRPO：Group Relative Policy Optimization](#8-grpogroup-relative-policy-optimization)
+- [9. Anthropic 的 RLHF 贡献](#9-anthropic-的-rlhf-贡献)
+- [10. RLHF 的工业实践](#10-rlhf-的工业实践)
+- [11. 项目实践](#11-项目实践)
+- [12. 章节衔接：从 RLHF 到 DPO](#12-章节衔接从-rlhf-到-dpo)
 
 ---
 
@@ -639,11 +673,128 @@ DeepSeek-R1 展示了 RLHF/GRPO 在推理能力上的应用——通过奖励设
 
 ---
 
-## 8. Anthropic 的 RLHF 贡献
+## 8. GRPO：Group Relative Policy Optimization
+
+GRPO 是 DeepSeek 在 DeepSeekMath 论文中首次提出的策略优化方法，后在 DeepSeek-V3 和 DeepSeek-R1 中得到广泛应用。它代表了一种**不同于 PPO 的 RLHF 技术路线**——通过去除 Critic 模型、利用组内相对排名来简化训练流程。
+
+### 8.1 GRPO 的核心动机
+
+传统 PPO-RLHF 需要四个模型（Actor、Critic、Reward Model、Reference Model），其中 Critic 模型带来三个问题：
+
+1. **显存翻倍**：Critic 与 Actor 规模相当，需要额外的显存存储参数和优化器状态
+2. **训练不稳定**：Critic 自身的训练不稳定会传导到 Actor 的优势估计中
+3. **偏差引入**：如果 Critic 的价值估计不准确，会导致 GAE 计算出有偏差的优势
+
+GRPO 的核心思想：**用同一个 prompt 的多个采样结果的相对排名，替代 Critic 的价值估计**。
+
+### 8.2 GRPO 算法详解
+
+**步骤 1：组采样（Group Sampling）**
+
+对于每个 prompt $q$，用当前策略 $\pi_{\theta_{\text{old}}}$ 采样一组 $G$ 个 response：
+
+$$\{o_1, o_2, \ldots, o_G\} \sim \pi_{\theta_{\text{old}}}(\cdot | q)$$
+
+**步骤 2：奖励评估**
+
+用奖励模型（或规则奖励函数）给每个 response 打分：
+
+$$\{r_1, r_2, \ldots, r_G\} = \{R(q, o_1), R(q, o_2), \ldots, R(q, o_G)\}$$
+
+**步骤 3：组内归一化（核心创新）**
+
+计算每个 response 的相对优势：
+
+$$\boxed{\hat{A}_i = \frac{r_i - \text{mean}(\{r_1, \ldots, r_G\})}{\text{std}(\{r_1, \ldots, r_G\})}}$$
+
+这是**序列级别**的优势估计（不是 token 级别），不需要 Critic 模型。
+
+**直觉理解**：
+- 如果一个 response 的奖励**高于组内平均**，$\hat{A}_i > 0$，策略应该增加生成它的概率
+- 如果一个 response 的奖励**低于组内平均**，$\hat{A}_i < 0$，策略应该降低生成它的概率
+- 归一化保证了优势估计的数值稳定性
+
+**步骤 4：PPO 风格的裁剪更新**
+
+虽然优势估计是序列级别的，但策略更新仍然在 token 级别进行：
+
+$$L_{\text{GRPO}}(\theta) = \mathbb{E}_{q, \{o_i\}} \left[ \frac{1}{G} \sum_{i=1}^{G} \frac{1}{|o_i|} \sum_{t=1}^{|o_i|} \min\left( \rho_{i,t} \hat{A}_i, \; \text{clip}(\rho_{i,t}, 1-\epsilon, 1+\epsilon) \hat{A}_i \right) \right] - \beta \cdot D_{\text{KL}}$$
+
+其中重要性采样比率 $\rho_{i,t} = \frac{\pi_\theta(o_{i,t} | q, o_{i,<t})}{\pi_{\theta_{\text{old}}}(o_{i,t} | q, o_{i,<t})}$。
+
+### 8.3 PPO vs GRPO 训练流程对比
+
+```mermaid
+graph TB
+    subgraph "PPO-RLHF 训练流程"
+        P1["采样 Prompt"] --> A1["Actor 生成 1 个 Response"]
+        A1 --> R1["Reward Model 打分"]
+        A1 --> REF1["Reference Model 计算 KL"]
+        A1 --> C1["Critic 模型估计 V(s)"]
+        R1 --> GAE1["GAE 计算 token 级优势"]
+        REF1 --> GAE1
+        C1 --> GAE1
+        GAE1 --> PPO1["PPO 裁剪更新<br/>Actor + Critic"]
+    end
+
+    subgraph "GRPO 训练流程"
+        P2["采样 Prompt"] --> A2["Actor 生成 G 个 Response"]
+        A2 --> R2["Reward Model 打分<br/>得到 r_1, ..., r_G"]
+        R2 --> NORM["组内归一化<br/>A_i = (r_i - mean) / std"]
+        A2 --> REF2["Reference Model 计算 KL"]
+        NORM --> PPO2["PPO 裁剪更新<br/>仅更新 Actor"]
+        REF2 --> PPO2
+    end
+
+    style C1 fill:#ffcdd2
+    style NORM fill:#c8e6c9
+    style PPO1 fill:#e3f2fd
+    style PPO2 fill:#e3f2fd
+```
+
+**关键差异总结**：
+
+| 方面 | PPO | GRPO |
+|------|-----|------|
+| 优势估计来源 | Critic + GAE（token 级别） | 组内归一化（序列级别） |
+| 需要的模型数 | 4（Actor, Critic, RM, Ref） | 3（Actor, RM, Ref） |
+| 显存占用 | 高（需要 Critic） | 低（省掉 Critic） |
+| 推理开销 | 低（每个 prompt 1 次生成） | 高（每个 prompt G 次生成） |
+| 优势估计偏差 | 取决于 Critic 准确度 | 无偏（组内相对比较） |
+| 方差控制 | 通过 GAE 的 $\lambda$ 控制 | 取决于组大小 G |
+| 最适用场景 | 通用 RLHF | 可验证奖励的场景（数学/代码） |
+
+### 8.4 组大小 $G$ 的选择与权衡
+
+组大小 $G$ 是 GRPO 最关键的超参数之一：
+
+| G 值 | 优势 | 劣势 | 应用场景 |
+|------|------|------|----------|
+| 4-8 | 推理开销小 | 归一化统计量不稳定 | DeepSeek-V3（效率优先） |
+| 16-32 | 平衡效率与稳定性 | — | 通用场景 |
+| 64-128 | 归一化非常准确 | 推理开销大 | DeepSeekMath（精度优先） |
+
+当 $G$ 较小时，$\text{mean}$ 和 $\text{std}$ 的估计可能不准确，导致优势估计波动较大。极端情况下，如果 $G=2$，则变成简单的"好 vs 差"的二元对比，信息量有限。
+
+### 8.5 GRPO 在 DeepSeek-R1 中的应用
+
+DeepSeek-R1 是 GRPO 最成功的应用案例。在 R1 的训练中，GRPO 被用于引导模型发展出推理能力：
+
+**奖励设计**：
+- **准确性奖励**：数学题验证答案正确性（$r = 1$ 或 $r = 0$）、代码题运行测试用例
+- **格式奖励**：检查输出是否包含 `<think>...</think>` 标签（确保模型展示推理过程）
+
+**关键发现**：在 R1-Zero 实验中，即使不提供任何 SFT 数据，仅靠 GRPO + 规则奖励，模型就自发涌现出了链式思维（CoT）、自我反思等推理行为。这表明 GRPO 的组内相对比较机制能有效引导模型探索有益的行为模式。
+
+> 更详细的 GRPO 数学推导、KL 散度的方向选择分析，参见 [进阶文档](./advanced.md)。
+
+---
+
+## 9. Anthropic 的 RLHF 贡献
 
 Anthropic 在 RLHF 领域有着奠基性的贡献。可以说，没有 Anthropic 研究团队的开创性工作，RLHF 不会成为今天 LLM 对齐的主流范式。
 
-### 8.1 RLHF 奠基论文
+### 9.1 RLHF 奠基论文
 
 2017 年，Paul Christiano 等人（后来成为 Anthropic 的核心成员）发表了 **"Deep Reinforcement Learning from Human Preferences"**，这篇论文首次系统性地提出了 RLHF 的完整框架：
 
@@ -652,7 +803,7 @@ Anthropic 在 RLHF 领域有着奠基性的贡献。可以说，没有 Anthropic
 
 这一范式后来被 OpenAI（InstructGPT）和 Anthropic 自身（Claude）广泛采用。
 
-### 8.2 Constitutional AI（CAI）
+### 9.2 Constitutional AI（CAI）
 
 Constitutional AI 是 Anthropic 提出的核心对齐方法，用 **AI 反馈替代人类反馈**（RLAIF）。
 
@@ -691,7 +842,7 @@ graph TB
 
 > CAI 的完整技术框架和数学细节，参见 [进阶文档](./advanced.md)。
 
-### 8.3 HH-RLHF 数据集
+### 9.3 HH-RLHF 数据集
 
 Anthropic 发布的 **HH-RLHF（Helpful and Harmless RLHF）** 数据集是开源偏好数据的标杆：
 
@@ -700,7 +851,7 @@ Anthropic 发布的 **HH-RLHF（Helpful and Harmless RLHF）** 数据集是开�
 - **数据格式**：(prompt, chosen_response, rejected_response)
 - **影响力**：被学术界和工业界广泛使用作为 RLHF 基准数据
 
-### 8.4 HHH 对齐目标
+### 9.4 HHH 对齐目标
 
 Anthropic 提出了 LLM 对齐的 **HHH 框架**：
 
@@ -712,7 +863,93 @@ RLHF 是实现 HHH 目标的核心技术手段。
 
 ---
 
-## 9. 项目实践
+## 10. RLHF 的工业实践
+
+本节汇总三条技术线在 RLHF 工业化落地中的关键经验，聚焦于工程层面的实践洞察。
+
+### 10.1 Google：多维度奖励模型与安全训练
+
+Google 在 Gemini 系列中采用了**多维度奖励建模**的策略，而非使用单一标量奖励模型：
+
+| 维度 | 对应的奖励模型 | 训练数据来源 | 权重调节 |
+|------|--------------|------------|---------|
+| Helpful（有帮助性） | $r_{\text{helpful}}(x, y)$ | 通用偏好标注 | 高权重 |
+| Harmless（无害性） | $r_{\text{harmless}}(x, y)$ | 安全标注 + Red Teaming | 高权重（安全优先） |
+| Honest（诚实性） | $r_{\text{honest}}(x, y)$ | 事实核查标注 | 中等权重 |
+| Instruction Following | $r_{\text{follow}}(x, y)$ | 指令遵循评估 | 中等权重 |
+
+**多维度奖励的融合策略**：
+
+$$R_{\text{total}}(x, y) = \sum_{m=1}^{M} w_m \cdot r_m(x, y) \quad \text{subject to} \quad r_{\text{harmless}}(x, y) \geq \tau_{\text{safety}}$$
+
+即在满足安全性硬约束的前提下，加权优化多个目标。当安全性奖励低于阈值 $\tau_{\text{safety}}$ 时，直接将总奖励设为强烈负值，确保模型不会为了"有帮助"而产生有害内容。
+
+### 10.2 DeepSeek-R1 的完整训练流水线
+
+DeepSeek-R1 展示了 RLHF/GRPO 从"对齐工具"扩展为"能力增强工具"的完整技术路线：
+
+```mermaid
+graph LR
+    subgraph "阶段 1: 冷启动"
+        A["DeepSeek-V3 Base"] -->|"少量推理 SFT 数据<br/>(长 CoT 示例)"| B["Cold Start Model"]
+    end
+
+    subgraph "阶段 2: RL 训练 (GRPO)"
+        B -->|"GRPO + 规则奖励<br/>数学/代码正确性"| C["RL Checkpoint"]
+    end
+
+    subgraph "阶段 3: 拒绝采样 + SFT"
+        C -->|"拒绝采样生成<br/>高质量推理数据"| D["生成 80 万条<br/>推理数据"]
+        D -->|"混合通用 SFT 数据<br/>再次 SFT"| E["SFT Model"]
+    end
+
+    subgraph "阶段 4: 最终 RL"
+        E -->|"GRPO<br/>多任务奖励"| F["DeepSeek-R1"]
+    end
+
+    style C fill:#fff9c4
+    style F fill:#c8e6c9
+```
+
+**关键技术细节**：
+- **阶段 1 的冷启动数据**：仅需数千条高质量长 CoT 示例，用于建立基本的推理格式
+- **阶段 2 的奖励设计**：只用规则奖励（准确性 + 格式），不使用神经网络奖励模型
+- **阶段 3 的拒绝采样**：对每个 prompt 生成多个回答，只保留正确且推理过程清晰的结果
+- **阶段 4 的多任务奖励**：在推理能力基础上，加入通用对齐目标
+
+### 10.3 奖励模型的 Scaling
+
+一个重要但容易被忽视的问题：**奖励模型是否也遵循 Scaling Laws？**
+
+目前的经验证据表明：
+- 奖励模型的准确率随参数量增大而提升，但提升幅度不如基座模型显著
+- **奖励模型与策略模型的规模匹配很重要**：如果策略模型远大于奖励模型，策略更容易"欺骗"奖励模型（reward hacking）
+- InstructGPT 的经验：6B 奖励模型 + 175B 策略模型 → 容易 reward hack；175B 奖励模型 + 175B 策略模型 → 更稳定
+
+**推荐实践**：奖励模型的参数量应不小于策略模型的 $\frac{1}{4}$，且使用与策略模型相同的预训练基座初始化。
+
+### 10.4 过程奖励 vs 结果奖励
+
+| 方面 | ORM (Outcome Reward Model) | PRM (Process Reward Model) |
+|------|---------------------------|---------------------------|
+| 奖励粒度 | 序列末尾给一个分数 | 每个推理步骤给一个分数 |
+| 信号密度 | 稀疏 | 密集 |
+| 信用分配 | 困难（需要 GAE 等方法） | 自然（每步有奖励） |
+| 标注成本 | 低（只需判断最终答案） | 高（需要逐步评估推理过程） |
+| 适用场景 | 通用对齐 | 推理任务（数学、代码、逻辑） |
+| 代表工作 | InstructGPT | OpenAI "Let's Verify Step by Step" |
+
+**PRM 在 RLHF 中的集成**：当使用 PRM 时，token 级奖励变为：
+
+$$r_t = \begin{cases} r_k^{\text{PRM}} & \text{若 token } t \text{ 是推理步骤 } k \text{ 的最后一个 token} \\ 0 & \text{其他位置} \end{cases}$$
+
+这样 GAE 可以利用更密集的奖励信号，显著减少方差，使训练更加稳定。
+
+> PRM 与 GRPO 的结合是一个有趣的研究方向：GRPO 使用序列级奖励，而 PRM 提供步骤级奖励。能否设计一种"步骤级 GRPO"，在每个推理步骤进行组内比较？这是尚未被充分探索的开放问题。
+
+---
+
+## 11. 项目实践
 
 ### 项目 1：训练一个文本情感奖励模型 (⭐⭐)
 
@@ -1006,6 +1243,161 @@ graph TB
 
 ---
 
+### 项目 5：GRPO 简化实现与对比实验 (⭐⭐)
+
+**目标**：实现简化版 GRPO 算法，并在简单任务上与 PPO 进行对比，理解两种方法的核心差异。
+
+**提供**：算法伪代码 + 核心代码片段 + 实验设计
+
+**GRPO 算法伪代码**：
+
+```
+GRPO 训练循环:
+    初始化: actor (从 SFT 加载), reward_fn (规则奖励或奖励模型), ref_model (冻结)
+    超参数: G (组大小), epsilon (裁剪系数), beta (KL 系数), lr
+
+    for iteration = 1, 2, ..., N:
+        // Step 1: 组采样
+        prompts = sample_prompts(dataset, batch_size=B)
+        for each prompt q in prompts:
+            responses = [actor.generate(q) for _ in range(G)]  // 采样 G 个回答
+            rewards = [reward_fn(q, r) for r in responses]     // 评估每个回答
+
+        // Step 2: 组内归一化
+        for each prompt group:
+            mean_r = mean(rewards)
+            std_r = std(rewards) + 1e-8
+            advantages = [(r - mean_r) / std_r for r in rewards]
+
+        // Step 3: 计算旧策略的 log_probs
+        old_log_probs = actor.log_probs(prompts, all_responses).detach()
+        ref_log_probs = ref_model.log_probs(prompts, all_responses)
+
+        // Step 4: PPO 风格的裁剪更新
+        for epoch = 1, ..., K:
+            new_log_probs = actor.log_probs(prompts, all_responses)
+
+            // token 级别的比率和裁剪
+            ratio = exp(new_log_probs - old_log_probs)
+            surr1 = ratio * advantages  // advantages 是序列级的，广播到每个 token
+            surr2 = clip(ratio, 1-eps, 1+eps) * advantages
+            policy_loss = -min(surr1, surr2).mean()
+
+            // KL 惩罚
+            kl = mean(new_log_probs - ref_log_probs)
+            loss = policy_loss + beta * kl
+
+            loss.backward()
+            clip_grad_norm(max_norm=1.0)
+            optimizer.step()
+```
+
+**核心代码片段**：
+
+```python
+def grpo_advantage(rewards: list[float]) -> list[float]:
+    """GRPO 组内归一化优势计算"""
+    mean_r = sum(rewards) / len(rewards)
+    std_r = (sum((r - mean_r) ** 2 for r in rewards) / len(rewards)) ** 0.5
+    std_r = max(std_r, 1e-8)  # 避免除零
+    return [(r - mean_r) / std_r for r in rewards]
+
+# 示例: 一个 prompt 采样 8 个回答的奖励
+rewards = [0.8, 0.2, 0.6, 0.9, 0.1, 0.5, 0.7, 0.3]
+advantages = grpo_advantage(rewards)
+# 高奖励的回答获得正优势，低奖励的获得负优势
+```
+
+**实验设计**：
+
+```mermaid
+graph TB
+    subgraph "实验任务"
+        T1["任务 1: 文本情感控制<br/>奖励 = 正面情感分数"]
+        T2["任务 2: 简单数学题<br/>奖励 = 答案正确 (0/1)"]
+    end
+
+    subgraph "对比方法"
+        M1["PPO (含 Critic)"]
+        M2["GRPO-G4 (组大小=4)"]
+        M3["GRPO-G16 (组大小=16)"]
+        M4["GRPO-G64 (组大小=64)"]
+    end
+
+    subgraph "评估指标"
+        E1["奖励收敛速度"]
+        E2["训练稳定性<br/>(奖励曲线方差)"]
+        E3["生成多样性<br/>(distinct-n)"]
+        E4["训练成本<br/>(GPU 时间)"]
+    end
+
+    T1 --> M1
+    T1 --> M2
+    T2 --> M3
+    T2 --> M4
+    M1 --> E1
+    M2 --> E2
+    M3 --> E3
+    M4 --> E4
+
+    style E1 fill:#c8e6c9
+    style E2 fill:#c8e6c9
+    style E3 fill:#c8e6c9
+    style E4 fill:#c8e6c9
+```
+
+**思考问题**：
+1. 在什么条件下 GRPO 优于 PPO？（提示：考虑奖励函数是否可验证）
+2. 增大组大小 $G$ 在什么时候回报递减？
+3. 对于开放式生成任务（如创意写作），GRPO 的组内归一化是否合适？为什么？
+4. 如果组内所有回答的奖励都非常接近（std 接近 0），GRPO 会遇到什么问题？
+
+**参考代码**：本项目可复用 [code/rlhf/ppo_trainer.py](../code/rlhf/ppo_trainer.py) 中的基础设施，将 Critic + GAE 部分替换为 GRPO 的组内归一化逻辑。
+
+---
+
+## 12. 章节衔接：从 RLHF 到 DPO
+
+### RLHF 的核心价值
+
+回顾本章的内容，RLHF 体系有三个核心贡献：
+
+1. **偏好建模**：Bradley-Terry 模型将主观的人类偏好转化为可优化的数学目标
+2. **策略优化**：PPO/GRPO 在保持生成质量的同时，有效地优化了偏好目标
+3. **安全对齐**：通过奖励模型设计和 KL 约束，实现了 HHH（有帮助、无害、诚实）多目标平衡
+
+RLHF 的成功——从 InstructGPT 到 ChatGPT，从 Claude 到 Gemini——证明了基于人类反馈的对齐是可行且有效的。
+
+### RLHF 的核心局限
+
+然而，RLHF 也有显著的局限性：
+
+| 局限 | 具体表现 | 影响 |
+|------|---------|------|
+| **工程复杂度高** | 需要同时管理 4 个模型（PPO）或 3 个模型（GRPO） | 开发和调试成本高 |
+| **训练不稳定** | PPO 对超参数极度敏感，reward hacking 难以根治 | 需要大量调参经验 |
+| **奖励模型偏差** | 奖励模型是人类偏好的不完美代理 | Goodhart's Law 无法完全避免 |
+| **标注成本高** | 需要大量高质量的人类偏好标注 | 数据获取成本高 |
+| **采样效率低** | 需要在线生成大量 response | 训练速度慢 |
+
+### 过渡到 DPO
+
+这些局限催生了一个自然的问题：**能否绕过奖励模型和 RL 训练，直接从偏好数据中优化策略？**
+
+2023 年，Rafailov 等人在 DPO（Direct Preference Optimization）论文中给出了肯定的回答。他们证明了 RLHF 的优化目标存在闭式最优解：
+
+$$\pi^*(y|x) = \frac{1}{Z(x)} \pi_{\text{ref}}(y|x) \exp\left(\frac{1}{\beta} r(x, y)\right)$$
+
+由此可以反推出隐式奖励：
+
+$$r(x, y) = \beta \log \frac{\pi^*(y|x)}{\pi_{\text{ref}}(y|x)} + \beta \log Z(x)$$
+
+将此代入 Bradley-Terry 模型，配分函数 $Z(x)$ 在偏好对的差值中被消去，从而得到了 **DPO 损失函数**——一个无需奖励模型、无需 RL 训练、仅需偏好数据的简单目标函数。
+
+> **下一模块**将完整推导 DPO 的数学框架，并分析 DPO 及其变体（IPO、KTO、ORPO、SimPO、GRPO）的设计动机和适用场景。
+
+---
+
 > **参考文献**：
 >
 > - Christiano, P. et al. (2017). "Deep Reinforcement Learning from Human Preferences." NeurIPS.
@@ -1014,5 +1406,9 @@ graph TB
 > - Ouyang, L. et al. (2022). "Training language models to follow instructions with human feedback." NeurIPS (InstructGPT).
 > - Bai, Y. et al. (2022). "Constitutional AI: Harmlessness from AI Feedback." arXiv:2212.08073.
 > - Bai, Y. et al. (2022). "Training a Helpful and Harmless Assistant with RLHF." arXiv:2204.05862.
+> - Rafailov, R. et al. (2023). "Direct Preference Optimization: Your Language Model is Secretly a Reward Model." NeurIPS.
 > - DeepSeek-AI. (2024). "DeepSeek-V3 Technical Report."
+> - DeepSeek-AI. (2025). "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning."
 > - Shao, Z. et al. (2024). "DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models."
+> - Lightman, H. et al. (2023). "Let's Verify Step by Step." arXiv:2305.20050.
+> - Gemini Team, Google. (2023). "Gemini: A Family of Highly Capable Multimodal Models."

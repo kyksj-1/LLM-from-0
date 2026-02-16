@@ -534,6 +534,149 @@ graph TB
 - 小模型通过 SFT 学习这些数据比自己探索更高效
 - 但蒸馏模型的推理能力有上限，受限于教师模型
 
+### 4.5 推理计算的 Scaling Law
+
+训练阶段的 Scaling Law（Kaplan et al., 2020; Hoffmann et al., 2022）描述了模型性能如何随训练计算量增长。推理阶段是否存在类似的规律？
+
+**推理 Scaling Law 的基本形式**：
+
+对于 Best-of-N 策略，性能（pass rate）随 $N$ 的增长可以近似为：
+
+$$\text{Accuracy}(N) \approx 1 - (1-p)^N \approx 1 - \exp(-pN)$$
+
+其中 $p$ 是模型的单次正确率。这是一个**指数饱和曲线**——初期增长快，后期收益递减。
+
+对于更一般的测试时计算（包括更长的推理链），Snell et al. (2024) 发现性能可以近似为：
+
+$$\text{Performance}(C_{test}) \approx a \cdot \log(C_{test}) + b$$
+
+即性能随推理计算的**对数**增长——这与训练 Scaling Law 中性能随训练计算的幂律增长形成对比。
+
+**训练 Scaling Law vs 推理 Scaling Law 对比**：
+
+| 维度 | 训练 Scaling Law | 推理 Scaling Law |
+|------|-----------------|-----------------|
+| 函数形式 | 幂律: $L \propto C^{-\alpha}$ | 对数: $\text{Acc} \propto \log(C)$ |
+| 收益递减速度 | 相对缓慢 | 相对较快 |
+| 适用范围 | 通用能力提升 | 特定任务的推理质量 |
+| 成本特征 | 一次性投入（训练完成即可） | 每次推理都需支付 |
+| 资源复用 | 训练好的模型可服务所有用户 | 每个请求独立消耗推理计算 |
+
+**"推理计算 vs 训练计算"的资源分配权衡**：
+
+这是一个具有深刻工程意义的问题。假设你有固定的总计算预算 $C_{total}$：
+
+$$C_{total} = C_{train} + C_{test} \cdot Q$$
+
+其中 $Q$ 是预期的查询总量。分配策略取决于：
+
+- **查询量小**（$Q$ 小，如科研场景）：可以大量投入推理计算，用小模型 + 大量推理计算
+- **查询量大**（$Q$ 大，如生产环境）：训练一个更强的模型更划算，减少每次推理的计算量
+- **关键决策问题**（高价值、低频率）：推理计算的投资回报率最高
+
+```mermaid
+graph TB
+    subgraph "场景分析"
+        A["科研/竞赛<br/>Q小, 精度优先<br/>→ 大量推理计算"]
+        B["在线服务<br/>Q大, 成本优先<br/>→ 更强的基础模型"]
+        C["安全关键决策<br/>价值极高<br/>→ 推理+验证+人工审查"]
+    end
+
+    style A fill:#e3f2fd
+    style B fill:#fff3e0
+    style C fill:#ffcdd2
+```
+
+**Brown et al. (2024) "Large Language Monkeys" 的发现**：
+
+该研究系统地测试了大量重复采样对代码生成任务的影响：
+- 在 SWE-bench Lite 上，将采样数从 1 增加到 250，解决率从 15.9% 提升到 56%
+- 但这意味着计算量增加了 250 倍，而性能提升约 3.5 倍
+- 推理 Scaling 的效率远低于训练 Scaling，但在特定场景下仍然有价值
+
+### 4.6 Verification（验证）前沿
+
+验证器是测试时计算的核心组件。如何构建可靠的验证器，是推理系统面临的根本性挑战。
+
+**形式化验证 vs 神经网络验证**：
+
+| 方法 | 原理 | 可靠性 | 适用范围 | 代表工具/方法 |
+|------|------|--------|----------|-------------|
+| 形式化验证 | 基于数学证明系统 | 100%（逻辑无误即保证正确） | 数学证明、程序正确性 | Lean 4, Coq, Isabelle |
+| 神经网络验证 (ORM) | 训练模型判断最终答案 | ~70-85%（存在误判） | 通用推理任务 | 训练一个分类/回归模型 |
+| 神经网络验证 (PRM) | 训练模型逐步判断 | ~80-90%（比 ORM 好） | 逐步推理任务 | Lightman et al. (2023) |
+| 规则验证 | 预定义的正确性检查规则 | 取决于规则覆盖度 | 数学计算、代码执行 | 单元测试、答案比对 |
+
+**形式化验证的理想与现实**：
+- AlphaProof 使用 Lean 4 验证器达到了 IMO 银牌水平，证明形式化验证的强大
+- 但形式化验证要求问题被"翻译"为形式语言，这本身就是一个困难任务
+- 目前仅在数学证明和程序验证领域可行，无法覆盖自然语言推理
+
+**Math-Shepherd：自动生成过程监督数据**
+
+Wang et al. (2024) 提出的 Math-Shepherd 方法解决了 PRM 训练数据获取困难的问题：
+
+**核心思想**：不需要人工标注每个推理步骤，而是通过**蒙特卡洛采样**自动估计每个步骤的正确性。
+
+```mermaid
+graph TB
+    A["推理链: s₁ → s₂ → s₃ → s₄ → answer"] --> B["对每个步骤 sₖ"]
+    B --> C["从 sₖ 继续采样 M 条完整路径"]
+    C --> D["检查这 M 条路径的最终答案"]
+    D --> E["正确率 p(sₖ) = 正确路径数 / M"]
+    E --> F["p(sₖ) > 阈值 → 标记为正确步骤<br/>p(sₖ) < 阈值 → 标记为错误步骤"]
+
+    style A fill:#e3f2fd
+    style F fill:#e8f5e9
+```
+
+**Math-Shepherd 的关键公式**：
+
+对于推理链的第 $k$ 步 $s_k$，其自动标注的正确性分数为：
+
+$$\hat{y}_k = \frac{1}{M} \sum_{m=1}^{M} \mathbf{1}[\text{complete}(s_1, \ldots, s_k, r_k^{(m)}) = a^*]$$
+
+其中 $r_k^{(m)}$ 是从第 $k$ 步开始的第 $m$ 条续写路径，$a^*$ 是标准答案。
+
+**Math-Shepherd 的效果**：
+
+| 方法 | MATH 准确率 | 标注成本 |
+|------|-----------|---------|
+| ORM + Best-of-N | 63.2% | 低（仅需答案标注） |
+| 人工标注 PRM + Best-of-N | 78.2% | 极高（逐步人工标注） |
+| Math-Shepherd PRM + Best-of-N | **76.5%** | **低（自动生成）** |
+
+Math-Shepherd 几乎追平了人工标注 PRM 的效果，同时消除了昂贵的人工标注需求。
+
+**验证器的可靠性问题：验证器也会犯错**
+
+一个被经常忽视的根本问题是：**验证器本身也是不完美的**。
+
+验证器的错误类型：
+
+1. **假阳性（False Positive）**：错误的推理/答案被验证器判为正确
+   - 危害：可能选择错误答案，反而不如多数投票
+   - 常见原因：验证器对某些错误模式"盲区"
+
+2. **假阴性（False Negative）**：正确的推理/答案被验证器判为错误
+   - 危害：浪费了本可使用的正确答案
+   - 常见原因：推理路径不符合验证器见过的"标准格式"
+
+**验证器可靠性与 Best-of-N 的交互**：
+
+设验证器的精度为 $\text{prec}$（将正确答案判为正确的概率）、召回为 $\text{rec}$（不误判错误答案为正确的概率）。
+
+当验证器精度不够高时，Best-of-N 可能反而劣于简单的多数投票：
+
+$$\text{Best-of-N 有效当且仅当 } \text{prec} > \frac{1}{1 + \frac{p}{1-p} \cdot N}$$
+
+其中 $p$ 是模型的基础正确率。**验证器质量不足时，增加 $N$ 反而会引入更多被错误验证的候选**。
+
+**实践建议**：
+- 在部署 Best-of-N 之前，先评估验证器在目标任务上的精度和召回
+- 如果验证器不够可靠，简单多数投票往往是更安全的选择
+- 考虑"验证器集成"：同时使用多个验证器，取交集或加权平均
+
 ---
 
 ## 5. 自动化评测流水线（LLM-as-a-Judge）
@@ -790,3 +933,6 @@ graph TB
 8. Lanham, T., et al. (2023). "Measuring Faithfulness in Chain-of-Thought Reasoning." Anthropic Research.
 9. Feng, X., et al. (2024). "AlphaZero-like Tree-Search can Guide Large Language Model Decoding and Training."
 10. Wang, P., et al. (2024). "Math-Shepherd: Verify and Reinforce LLMs Step-by-step without Human Annotations."
+11. Brown, B., et al. (2024). "Large Language Monkeys: Scaling Inference Compute with Repeated Sampling." arXiv:2407.21787.
+12. Kaplan, J., et al. (2020). "Scaling Laws for Neural Language Models." arXiv:2001.08361.
+13. Hoffmann, J., et al. (2022). "Training Compute-Optimal Large Language Models (Chinchilla)." NeurIPS 2022.

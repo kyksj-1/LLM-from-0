@@ -7,9 +7,13 @@
 ## 目录
 
 - [1. Google 的 MoE 研究](#1-google-的-moe-研究)
+  - [1.4 ST-MoE：稳定训练的设计选择](#14-st-moe稳定训练的设计选择)
+  - [1.5 Google 在 MoE 方向上的持续投入](#15-google-在-moe-方向上的持续投入)
 - [2. DeepSeek MoE 深度分析](#2-deepseek-moe-深度分析)
 - [3. Anthropic 视角](#3-anthropic-视角)
 - [4. 前沿话题](#4-前沿话题)
+  - [4.6 MoE + LoRA：参数高效微调的新挑战](#46-moe--lora参数高效微调的新挑战)
+  - [4.7 MoE 的推理优化：减少专家加载延迟](#47-moe-的推理优化减少专家加载延迟)
 
 ---
 
@@ -113,6 +117,49 @@ Expert Choice 保证了每个专家处理恰好 $C$ 个 token，但某些 token 
 - $m_t > 1$：被多个专家处理（获得额外计算资源）
 
 实验表明，高困惑度（高 perplexity）的 token 倾向于被更多专家选中（$m_t > 1$），而低困惑度的 token 可能被跳过（$m_t = 0$）。这意味着 Expert Choice 自动实现了**自适应计算**——更困难的 token 获得更多计算资源。
+
+### 1.4 ST-MoE：稳定训练的设计选择
+
+ST-MoE（Zoph et al., 2022, Google）是对 Switch Transformer 的改进，重点解决了 MoE 训练的稳定性问题，并系统性地研究了 MoE 模型的设计空间。
+
+**关键设计选择**：
+
+1. **Router z-loss**：ST-MoE 首次系统性地验证了 Router z-loss 对训练稳定性的重要性。实验表明，加入 z-loss 后，训练过程中的 loss spike 频率显著降低。
+
+2. **编码器-解码器架构中的 MoE 配置**：ST-MoE 发现在 Encoder-Decoder 架构中，只在编码器中使用 MoE（而解码器使用 Dense FFN）可以获得更好的效果与效率平衡。这是因为编码器可以并行处理所有 token，更适合 MoE 的 All-to-All 通信模式。
+
+3. **Top-2 路由的回归**：尽管 Switch Transformer 推广了 Top-1 路由，ST-MoE 的实验表明 Top-2 路由在下游任务上通常优于 Top-1，尤其是在微调场景中。
+
+4. **专家数量的影响**：ST-MoE 系统地测试了 32、64、128、256 个专家的配置，发现增加专家数量的收益在 128 个左右开始显著递减。
+
+**ST-MoE 的实验发现总结**：
+
+| 设计选择 | 推荐配置 | 理由 |
+|----------|---------|------|
+| 路由策略 | Top-2 | 比 Top-1 在微调后更优 |
+| 辅助损失系数 | 0.01 | 较小的值足以维持均衡 |
+| Router z-loss | 开启 | 显著改善训练稳定性 |
+| 专家数量 | 64-128 | 更多专家的边际收益递减 |
+| BF16 训练 | 必须 | FP16 下 MoE 训练不稳定 |
+
+### 1.5 Google 在 MoE 方向上的持续投入
+
+Google 是 MoE 在 Transformer 中应用的先驱，其研究脉络清晰：
+
+```mermaid
+graph LR
+    A["Shazeer et al. 2017<br/>Sparsely-Gated MoE<br/>(奠基)"] --> B["GShard 2021<br/>分布式 MoE<br/>(工程突破)"]
+    B --> C["Switch Transformer 2022<br/>Top-1 简化路由<br/>(万亿参数)"]
+    C --> D["ST-MoE 2022<br/>稳定训练设计<br/>(系统性研究)"]
+    D --> E["Expert Choice 2022<br/>反转路由范式<br/>(天然均衡)"]
+    E --> F["Soft MoE 2024<br/>可微路由<br/>(前沿探索)"]
+```
+
+**Google MoE 研究的核心特征**：
+- **工程导向**：从 GShard 的分布式工程到 Switch Transformer 的简化，始终追求大规模可落地
+- **系统性实验**：ST-MoE 对设计空间的全面探索为后续工作提供了重要参考
+- **持续创新**：从 hard routing 到 soft routing，不断突破 MoE 的理论边界
+- **对 Gemini 的推测**：虽然 Google 未公开 Gemini 的完整架构，但考虑到 Google 在 MoE 上的深厚积累，Gemini 很可能采用了 MoE 架构的某种变体来实现大规模参数量与合理推理成本的平衡
 
 ---
 
@@ -396,6 +443,82 @@ MoE 在推理阶段面临与训练不同的负载均衡问题。
 
 MoE 的路由特性为 Speculative Decoding 提供了新思路：可以使用路由到少量专家的"轻量"推理作为 draft，再由完整 MoE 验证。
 
+### 4.6 MoE + LoRA：参数高效微调的新挑战
+
+在 MoE 模型上进行参数高效微调（PEFT）面临独特的挑战，这是当前活跃的研究方向。
+
+**核心问题**：
+
+LoRA（Low-Rank Adaptation）通过在权重矩阵旁添加低秩分解 $\Delta W = BA$ 来实现微调。在 MoE 模型中，有多种策略选择：
+
+1. **只微调路由器**：仅在路由器的线性层 $W_g$ 上应用 LoRA
+   - 优点：参数最少，训练最快
+   - 缺点：无法调整专家的内部知识表示
+
+2. **只微调共享专家**：在共享专家的 FFN 上应用 LoRA
+   - 优点：共享专家处理通用知识，对微调影响最大
+   - 缺点：忽略了路由专家的适应能力
+
+3. **微调所有专家**：在每个路由专家上都应用 LoRA
+   - 优点：最大的适应灵活性
+   - 缺点：参数量爆炸（$N$ 个专家 $\times$ 每个 LoRA 的参数量）
+
+4. **混合策略**：共享专家 + 路由器 + 高频路由专家
+   - 根据专家的激活频率，优先微调被频繁使用的路由专家
+   - 低频专家保持冻结，减少过拟合风险
+
+**MoLoRA（MoE + LoRA 的专用设计）**：
+
+一种前沿方法是将 LoRA 本身设计为 MoE 结构——不同的 LoRA 适配器充当"微调专家"，由路由器决定每个 token 使用哪个 LoRA 适配器：
+
+$$\Delta W(x) = \sum_{i \in \text{TopK}} g_i(x) \cdot B_i A_i$$
+
+这种方法允许模型在微调时为不同类型的输入使用不同的适配策略，本质上是在适配层面引入条件计算。
+
+### 4.7 MoE 的推理优化：减少专家加载延迟
+
+MoE 模型的推理面临一个独特的挑战：**专家参数的加载延迟**。虽然每次推理只激活少数专家，但所有专家的参数都需要存储在可访问的存储中。
+
+**问题分析**：
+
+以 DeepSeek-V3（671B 参数）为例：
+- 全部参数在 FP16 下需要约 1.3 TB 显存
+- 即使使用 INT4 量化，仍需约 335 GB
+- 单张 GPU（80GB）远远不够，需要多卡或 offloading
+
+**解决方案一：专家缓存（Expert Caching）**
+
+基于时间局部性的观察——相邻 token 往往路由到相似的专家——可以将最近使用的专家保留在 GPU 显存中，不常用的专家放在 CPU 内存或 SSD 上。
+
+```
+专家缓存策略（LRU 风格）：
+1. 维护一个 GPU 上的专家缓存，容量为 C 个专家
+2. 当需要的专家在缓存中 → 直接计算（Cache Hit）
+3. 当需要的专家不在缓存中 → 从 CPU/SSD 加载（Cache Miss）
+4. 淘汰最久未使用的专家，腾出空间
+
+关键指标：Cache Hit Rate
+- 实测在长文本生成中，hit rate 可达 85-95%
+- 原因：语义连续的文本倾向于激活相似的专家集合
+```
+
+**解决方案二：预测式专家预加载**
+
+在生成第 $t$ 个 token 时，利用路由器预测第 $t+1$ 个 token 可能需要的专家，并提前开始加载。
+
+$$\hat{E}_{t+1} = \text{TopK}(\text{softmax}(W_g \cdot h_t)) \quad \text{（基于当前隐状态预测下一步路由）}$$
+
+这种方法可以将专家加载的延迟隐藏在当前 token 的计算中。
+
+**解决方案三：专家剪枝与合并**
+
+对于推理场景，可以对 MoE 模型进行后处理优化：
+- **低频专家剪枝**：移除几乎从不被激活的专家，减少存储需求
+- **相似专家合并**：将参数相近的专家合并为一个，降低模型规模
+- **蒸馏为 Dense 模型**：在特定任务上，将 MoE 蒸馏为更小的 Dense 模型（详见 4.3 节）
+
+这些方法在精度与效率之间做出不同程度的取舍，适用于不同的部署场景（边缘设备 vs 服务器集群）。
+
 ---
 
 ## 参考资料
@@ -406,12 +529,14 @@ MoE 的路由特性为 Speculative Decoding 提供了新思路：可以使用路
 2. Lepikhin et al. (2021). *GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding*. Google.
 3. Zhou et al. (2022). *Mixture-of-Experts with Expert Choice Routing*. Google.
 4. Puigcerver et al. (2024). *From Sparse to Soft Mixtures of Experts*. Google.
-5. DeepSeek-AI (2024). *DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models*.
-6. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model*.
-7. DeepSeek-AI (2024). *DeepSeek-V3 Technical Report*.
-8. Elhage et al. (2022). *Toy Models of Superposition*. Anthropic.
-9. Templeton et al. (2024). *Scaling Monosemanticity*. Anthropic.
-10. Bai et al. (2022). *Constitutional AI: Harmlessness from AI Feedback*. Anthropic.
+5. Zoph et al. (2022). *ST-MoE: Designing Stable and Transferable Sparse Expert Models*. Google.
+6. DeepSeek-AI (2024). *DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models*.
+7. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model*.
+8. DeepSeek-AI (2024). *DeepSeek-V3 Technical Report*.
+9. Elhage et al. (2022). *Toy Models of Superposition*. Anthropic.
+10. Templeton et al. (2024). *Scaling Monosemanticity*. Anthropic.
+11. Bai et al. (2022). *Constitutional AI: Harmlessness from AI Feedback*. Anthropic.
+12. Jiang et al. (2024). *Mixtral of Experts*. Mistral AI.
 
 ### 博客
 

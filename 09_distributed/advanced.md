@@ -10,6 +10,12 @@
 - [2. DeepSeek 的工程创新](#2-deepseek-的工程创新)
 - [3. Anthropic 视角](#3-anthropic-视角)
 - [4. 前沿话题](#4-前沿话题)
+  - [4.1 异构计算集群的训练调度](#41-异构计算集群的训练调度)
+  - [4.2 弹性训练](#42-弹性训练)
+  - [4.3 通信压缩与量化梯度](#43-通信压缩与量化梯度)
+  - [4.4 序列并行与上下文并行](#44-序列并行与上下文并行)
+  - [4.5 异构训练](#45-异构训练)
+  - [4.6 大规模训练的故障恢复](#46-大规模训练的故障恢复)
 - [5. 参考文献](#5-参考文献)
 
 ---
@@ -346,23 +352,182 @@ $$\mathbb{E}\left[\|\nabla f(\bar{x})\|^2\right] \leq O\left(\frac{1}{\sqrt{T}} 
 随着上下文窗口长度的增加（128K--1M tokens），注意力计算的显存和计算成本成为新的瓶颈。
 
 **序列并行（Sequence Parallelism）**：
-- 将序列维度切分到不同 GPU
-- 注意力计算中需要跨 GPU 的 Key/Value 通信
-- 适用于超长上下文场景
+
+Megatron-LM 提出的序列并行与张量并行配合使用。在标准张量并行中，LayerNorm 和 Dropout 等操作在所有 TP rank 上都持有完整的激活值副本——这是不必要的冗余。序列并行将这些"非张量并行区域"的激活值沿序列维度切分：
+
+- **切分对象**：LayerNorm、Dropout、残差连接等操作的激活值
+- **通信模式**：在进入张量并行区域时执行 All-Gather（沿序列维度收集），在退出张量并行区域时执行 Reduce-Scatter（沿序列维度散播并归约）
+- **显存节省**：$1/n_{TP}$（$n_{TP}$ 是张量并行度），对于 TP=8 可减少约 87.5% 的非并行区域激活显存
+
+```mermaid
+graph TB
+    subgraph "标准 TP: LayerNorm 激活重复"
+        LN_STD["LayerNorm<br/>[B, S, d] (每个 GPU 完整副本)"]
+    end
+
+    subgraph "序列并行: LayerNorm 激活分片"
+        LN_SP0["GPU 0: LayerNorm<br/>[B, S/n, d]"]
+        LN_SP1["GPU 1: LayerNorm<br/>[B, S/n, d]"]
+        LN_SP2["GPU 2: LayerNorm<br/>[B, S/n, d]"]
+    end
+```
 
 **Ring Attention**：
-- 将序列分为多个块，在 GPU 之间以环形拓扑传递 KV 块
-- 每个 GPU 在接收 KV 块的同时计算局部注意力
-- 支持任意长度的序列，显存与 GPU 数量成反比
 
-**上下文并行 vs 张量并行**：
+Ring Attention（Liu et al., 2023）解决了更根本的问题：当序列长度极长（如 1M tokens）时，即使使用 FlashAttention，单个 GPU 也无法容纳全部的 KV 缓存。
 
-| 维度 | 张量并行 | 上下文并行 |
-|------|---------|-----------|
-| 切分维度 | 特征/头维度 | 序列维度 |
-| 通信模式 | All-Reduce | Send/Recv (Ring) |
-| 适用场景 | 大模型 | 长上下文 |
-| 与 TP 正交 | - | 可以同时使用 |
+核心算法：
+1. 将长序列等分为 $n$ 个块（chunk），分配到 $n$ 个 GPU
+2. 每个 GPU 持有自己 chunk 的 Q、K、V
+3. 以环形拓扑传递 K、V 块，同时每个 GPU 计算当前持有的 KV 块与本地 Q 的注意力
+4. 经过 $n$ 轮传递后，每个 GPU 都与所有 KV 块完成了注意力计算
+
+$$\text{Ring Attention 显存} = O\left(\frac{S}{n} \cdot d\right) \quad \text{vs 标准注意力} = O(S \cdot d)$$
+
+关键优势是计算与通信完全重叠：在接收下一个 KV 块的同时，GPU 正在与当前 KV 块计算注意力。
+
+**Context Parallelism（上下文并行）**：
+
+Meta 在 Llama 3 训练中使用了 Context Parallelism (CP)，这是一种比 Ring Attention 更工程化的长序列分布式方案：
+
+- **与 Ring Attention 的区别**：CP 不仅处理注意力层，还将序列维度的切分贯穿整个 Transformer Block（包括 FFN）
+- **通信优化**：Llama 3 使用了基于 All-Gather 的方式而非纯环形传递，这在某些网络拓扑下效率更高
+- **与其他并行的组合**：CP 与 TP 正交（TP 切分特征维度，CP 切分序列维度），可以同时使用。Llama 3 405B 的训练使用了 TP=8 + CP=某值 + PP + DP 的多维并行组合
+- **因果注意力优化**：对于自回归模型，因果掩码使得序列前半段的 token 不需要与后半段的 KV 交互，CP 可以利用这一点跳过不必要的通信
+
+**上下文并行 vs 张量并行 vs 序列并行**：
+
+| 维度 | 张量并行 (TP) | 序列并行 (SP) | 上下文并行 (CP) |
+|------|-------------|-------------|---------------|
+| 切分维度 | 特征/头维度 | 序列维度（仅非 TP 区域） | 序列维度（全 Block） |
+| 通信模式 | All-Reduce | All-Gather / Reduce-Scatter | All-Gather 或 Ring |
+| 解决的问题 | 模型太大 | TP 区域外的激活冗余 | 序列太长 |
+| 与 TP 关系 | - | TP 的补充 | 正交，可同时使用 |
+| 硬件要求 | NVLink（高带宽） | 同 TP | 可跨节点 |
+
+### 4.5 异构训练
+
+现实中的训练集群并非总是由完全相同的 GPU 组成。异构训练（Heterogeneous Training）是处理混合硬件集群的新兴研究方向。
+
+**典型场景**：
+- 集群扩容时新购入的 H100 与已有的 A100 混合使用
+- 使用云服务商的 Spot Instance 时，分配到不同型号的 GPU
+- 训练中部分节点发生故障，替换为不同型号的备用机器
+
+**核心挑战与解决方案**：
+
+1. **计算速度不对称**：
+   - 问题：快速 GPU（如 H100）需要等待慢速 GPU（如 A100），造成资源浪费
+   - 方案：**自适应 micro-batch 分配**——给快速 GPU 分配更多 micro-batch，使每步的处理时间趋于一致
+   - 数学：设 GPU $i$ 的算力为 $F_i$，分配的 micro-batch 数为 $m_i = \lceil m \cdot F_i / \sum_j F_j \rceil$
+
+2. **显存容量不对称**：
+   - 问题：40GB 和 80GB 的 GPU 无法使用相同的 batch size
+   - 方案：**非均匀分片**——使用 ZeRO-3 时根据各 GPU 的显存容量分配不同大小的参数分片
+
+3. **互连带宽不对称**：
+   - 问题：NVLink 连接的 GPU 与 PCIe 连接的 GPU 混合使用
+   - 方案：**拓扑感知的并行策略分配**——将通信密集型的并行维度（TP）限制在高带宽连接的 GPU 组内
+
+**相关工作**：
+- **AMP (Adaptive Model Parallelism)**：根据设备能力自动选择并行策略
+- **Whale**：字节跳动的异构训练框架，支持混合 GPU 类型
+- **Varuna**：微软的弹性异构训练系统
+
+### 4.6 大规模训练的故障恢复
+
+#### 大规模训练的故障率
+
+大规模训练集群的硬件故障是**必然事件**，而非"如果"的问题：
+
+| 集群规模 | 每天预期故障次数 | 故障类型分布 |
+|---------|---------------|------------|
+| 100 GPU | ~0.1 | GPU 内存错误为主 |
+| 1000 GPU | ~1-3 | GPU 故障、网络中断、节点宕机 |
+| 10000+ GPU | ~10-30 | 上述所有 + 电力/冷却/存储故障 |
+
+Meta 在 Llama 3 405B 的训练报告中提到：在 16384 张 H100 GPU 上的 54 天训练期间，经历了 **419 次意外中断**——平均每 3 小时就有一次。其中：
+- **GPU 硬件故障**（如 HBM 内存错误）：占比最高
+- **网络故障**（InfiniBand 链路失效）：第二大来源
+- **软件/集群管理错误**：第三大来源
+- **其他**（电力波动、散热异常等）
+
+#### 自动 Checkpoint 与恢复策略
+
+**基础策略：定期 Checkpoint**
+
+最基本的容错方式是定期将训练状态保存到持久存储：
+
+```python
+# 简化的 checkpoint 保存逻辑
+def save_checkpoint(model, optimizer, step, path):
+    """保存完整训练状态"""
+    state = {
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'step': step,
+        'rng_state': torch.cuda.get_rng_state(),  # 保存随机数状态以确保可重复性
+    }
+    torch.save(state, f"{path}/checkpoint_{step}.pt")
+
+# 每 N 步保存一次
+CHECKPOINT_INTERVAL = 1000
+for step in range(total_steps):
+    train_step()
+    if step % CHECKPOINT_INTERVAL == 0:
+        save_checkpoint(model, optimizer, step, checkpoint_dir)
+```
+
+**挑战**：对于大模型，checkpoint 的保存本身就很耗时。例如，Llama 2 70B 模型的完整训练状态（参数 + 优化器 + 梯度）约 1.1 TB，写入磁盘需要数分钟。
+
+**进阶策略：异步 Checkpoint**
+
+将 checkpoint 保存操作放到后台线程中执行，不阻塞训练：
+
+1. 在内存中创建训练状态的快照（通过 Copy-on-Write 或显式复制）
+2. 后台线程将快照写入持久存储
+3. 训练继续进行，不等待写入完成
+
+**Google 的实践**：
+- TPU Pod 训练使用 Orbax 框架进行分布式 checkpoint
+- 支持异步保存和增量 checkpoint（只保存自上次 checkpoint 以来变化的部分）
+- Checkpoint 保存到 Google Cloud Storage，利用其高带宽和冗余存储
+
+**DeepSeek 的实践**：
+- DeepSeek-V3 训练中使用了高频 checkpoint（每 100 步）配合高速 NVMe SSD 存储
+- 故障恢复时间控制在 10 分钟以内（包括检测故障、重新分配任务、加载 checkpoint）
+- 使用 RDMA 直接从 GPU 显存写入远程存储，减少 CPU 参与
+
+#### 弹性训练（Elastic Training）
+
+弹性训练允许在 GPU 数量发生变化时继续训练，无需手动干预。
+
+**PyTorch Elastic (torchrun)** 的核心机制：
+
+1. **Rendezvous**：当节点加入或退出时，所有存活节点重新协商 world_size 和 rank 分配
+2. **State Repartitioning**：ZeRO 分片或 FSDP 的参数分片需要根据新的 world_size 重新划分
+3. **学习率调整**：GPU 数量变化时，有效 batch size 变化，可能需要相应调整学习率
+
+```mermaid
+graph TB
+    A["正常训练<br/>8 GPU"] -->|"GPU 3 故障"| B["检测故障<br/>+ 自动排除"]
+    B --> C["Rendezvous<br/>7 GPU 重新协商"]
+    C --> D["加载 Checkpoint<br/>重新分片"]
+    D --> E["恢复训练<br/>7 GPU"]
+    E -->|"新节点加入"| F["Rendezvous<br/>8 GPU 重新协商"]
+    F --> G["重新分片<br/>恢复训练"]
+```
+
+**数学影响**：当 GPU 数量从 $n$ 变为 $n'$ 时：
+
+- 数据并行的有效 batch size 变为 $B' = B \times n'/n$
+- 学习率可能需要线性缩放：$\eta' = \eta \times n'/n$（线性缩放规则）
+- ZeRO 分片需要重新划分：每 GPU 从 $P/n$ 变为 $P/n'$
+
+**当前局限**：
+- 张量并行和流水线并行的弹性调整非常困难（需要重新划分模型结构）
+- 实际中弹性训练主要应用于数据并行维度
+- Checkpoint 格式需要与 GPU 数量解耦（使用"逻辑分片"而非"物理分片"）
 
 ---
 
@@ -378,6 +543,10 @@ $$\mathbb{E}\left[\|\nabla f(\bar{x})\|^2\right] \leq O\left(\frac{1}{\sqrt{T}} 
 8. Li et al. (2023). *Sequence Parallelism: Long Sequence Training from System Perspective*. ACL.
 9. Liu et al. (2023). *Ring Attention with Blockwise Transformers for Near-Infinite Context*. arXiv.
 10. Alistarh et al. (2017). *QSGD: Communication-Efficient SGD via Gradient Quantization and Encoding*. NeurIPS.
+11. Korthikanti et al. (2023). *Reducing Activation Recomputation in Large Transformer Models*. MLSys. (Megatron-LM 序列并行)
+12. Dubey et al. (2024). *The Llama 3 Herd of Models*. arXiv. (Context Parallelism, 故障恢复统计)
+13. Thorpe et al. (2023). *Bamboo: Making Preemptible Instances Resilient for Affordable Training of Large Language Models*. arXiv.
+14. Zhao et al. (2023). *PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel*. VLDB.
 
 ---
 

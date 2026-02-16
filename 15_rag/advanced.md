@@ -1,6 +1,8 @@
 # RAG 与知识增强进阶：工业实践与前沿探索
 
-> 本文是 [模块15: RAG 与知识增强](./README.md) 的进阶补充，深入分析 Google、DeepSeek、Anthropic 三条技术线在 RAG 领域的工业实践，以及 Self-RAG、LongRAG、RAG 对齐等前沿研究方向。
+> **模块定位**：本文是 [模块15: RAG 与知识增强](./README.md) 的进阶补充。如果说 README.md 覆盖了 RAG 的核心原理和标准实践，那么本文将深入探索 RAG 的**工业化部署**、**前沿研究方向**和**新兴范式**。这些内容代表了 RAG 从"学术方案"向"生产系统"演进的关键技术，也是 LLM 应用开发者需要持续关注的前沿阵地。
+
+> 本文深入分析 Google、DeepSeek、Anthropic 三条技术线在 RAG 领域的工业实践，以及 Self-RAG、GraphRAG 深度解析、多模态 RAG、LongRAG、RAG 对齐等前沿研究方向。
 
 ---
 
@@ -9,7 +11,10 @@
 - [1. Google：从 REALM 到检索增强预训练](#1-google从-realm-到检索增强预训练)
 - [2. DeepSeek：工业级 RAG 部署实践](#2-deepseek工业级-rag-部署实践)
 - [3. Anthropic：RAG 安全与忠实度](#3-anthropicrag-安全与忠实度)
-- [4. 前沿话题](#4-前沿话题)
+- [4. GraphRAG 深度解析与知识图谱增强](#4-graphrag-深度解析与知识图谱增强)
+- [5. Self-RAG 与 Adaptive Retrieval](#5-self-rag-与-adaptive-retrieval)
+- [6. 多模态 RAG](#6-多模态-rag)
+- [7. 前沿话题](#7-前沿话题)
 
 ---
 
@@ -110,6 +115,50 @@ $$\alpha_{j,i} = \frac{\exp(q_j^T k_i / \sqrt{d})}{\sum_{l \leq j} \exp(q_j^T k_
 1. 用 RAG 从海量文档中筛选最相关的内容
 2. 将筛选后的内容放入长上下文窗口进行深度理解
 3. 这种"RAG + 长上下文"的组合方案兼顾了效率和准确性
+
+### 1.4 Gemini Grounding：Google 的生产级 RAG 实践
+
+Google 在 Gemini 系列模型中引入了 **Grounding**（接地）功能，本质上是将 RAG 能力深度集成到模型推理流程中。
+
+**Grounding 的核心机制**：
+
+Gemini 的 Grounding 不同于传统的外挂式 RAG，而是将检索能力作为模型的**原生能力**之一：
+
+1. **Google Search Grounding**：模型在推理过程中自动调用 Google 搜索，获取实时信息
+2. **Vertex AI Search Grounding**：对接企业私有知识库，实现企业级 RAG
+3. **Inline Citation**：模型自动在回答中嵌入引用标注，指向具体的来源 URL
+
+```mermaid
+graph TB
+    subgraph "Gemini Grounding 架构"
+        Q["用户查询"] --> G["Gemini 模型"]
+        G --> D{"需要外部信息?"}
+        D -->|"是"| S1["Google Search"]
+        D -->|"是"| S2["Vertex AI Search<br/>(企业知识库)"]
+        D -->|"否"| A["直接生成"]
+        S1 --> F["Grounding 融合层"]
+        S2 --> F
+        F --> A2["带引用的回答"]
+    end
+
+    style Q fill:#e3f2fd
+    style A fill:#e8f5e9
+    style A2 fill:#e8f5e9
+```
+
+**Grounding 的技术特点**：
+
+| 特性 | 说明 |
+|------|------|
+| **动态检索** | 模型自主决定何时检索（类似 Self-RAG 思想） |
+| **多源融合** | 同时支持 Web 搜索和企业私有知识库 |
+| **内联引用** | 每个事实声明自动附带来源链接 |
+| **置信度过滤** | 低置信度的检索结果会被自动过滤 |
+| **Grounding Score** | 提供 0-1 的 grounding 分数，量化回答的事实依据程度 |
+
+**与传统 RAG 的本质区别**：
+
+传统 RAG 是"先检索，再生成"的两阶段流水线。而 Gemini Grounding 更接近一种"检索增强推理"——模型在生成过程中**动态地、按需地**触发检索，检索结果直接影响后续的 token 生成。这意味着模型不是在一开始就检索所有信息，而是在推理链的不同阶段检索不同的信息。
 
 ---
 
@@ -322,6 +371,43 @@ Anthropic 在 Claude 产品中强调了**引用溯源**的重要性——模型�
 1. 在 Prompt 中为每个检索文档编号（如 [1], [2], [3]）
 2. 指示模型在生成时引用具体来源
 3. 后处理阶段验证引用的准确性（引用内容是否真的出现在对应文档中）
+
+### 3.4 Claude 的文档理解与 RAG 能力
+
+Claude 在 RAG 场景中展现了几项独特的产品级能力，使其成为 RAG 系统中的优质生成器。
+
+#### 长文档处理
+
+Claude 系列模型支持 200K token 的上下文窗口（Claude 3.5 Sonnet / Claude 3 Opus），这意味着：
+- 可以一次性处理多篇完整文档（而非仅处理 chunk）
+- 减少了因分块导致的信息割裂问题
+- 特别适合 LongRAG 范式（大 chunk + 长上下文阅读器）
+
+#### PDF 原生理解
+
+Claude 具备直接处理 PDF 文件的能力，包括：
+- 理解文档布局（标题、段落、表格、图注）
+- 提取表格中的结构化数据
+- 理解图表的含义（视觉推理）
+
+这对 RAG 系统的索引构建阶段有重要意义——传统 RAG 需要将 PDF 转换为纯文本再分块，过程中可能丢失布局信息。而 Claude 可以直接以 PDF 作为输入，保留更完整的文档语义。
+
+#### 引用精确度
+
+Anthropic 在 Claude 的引用能力上做了特别优化。在 RAG 场景下，Claude 能够：
+
+1. **精确引用**：不仅指出"来自文档 [2]"，还能指出具体的段落甚至句子
+2. **区分来源**：明确标注哪些信息来自检索文档，哪些来自模型自身知识
+3. **冲突处理**：当检索到的多个文档之间存在矛盾时，Claude 会指出矛盾并说明各方观点，而非默默选择一方
+
+**[推测] Claude RAG 能力的训练**：
+
+Anthropic 可能在 RLHF/Constitutional AI 训练中特别加入了"RAG 场景"的训练数据：
+- 包含检索内容正确的场景（模型应忠实引用）
+- 包含检索内容错误的场景（模型应批判性评估）
+- 包含检索内容矛盾的场景（模型应坦诚表达不确定性）
+
+这种"RAG-aware"的对齐训练使得 Claude 在 RAG 应用中表现出色。
 
 ---
 

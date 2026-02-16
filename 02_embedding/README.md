@@ -2,6 +2,24 @@
 
 > 嵌入是连接离散符号与连续计算的桥梁。词嵌入将离散的词元映射到连续向量空间，位置编码则赋予模型感知序列顺序的能力。本章将深入嵌入的数学原理，重点讲解旋转位置编码的推导与实现。
 
+### 本章定位
+
+嵌入层（Embedding Layer）是 LLM 中**第一个将离散 token ID 转化为连续向量表示**的模块。经过 Module 1 的分词处理后，文本被切分为一系列整数形式的 token ID。嵌入层的职责是将这些离散的整数映射到一个高维连续向量空间 $\mathbb{R}^d$，使得模型能够在这个空间中进行梯度优化和语义计算。位置编码则在此基础上注入序列顺序信息，是模型理解"谁在前、谁在后"的唯一来源。
+
+可以说，**嵌入层是模型理解语义的基础**——它决定了模型以怎样的"视角"看待输入 token，而位置编码决定了模型以怎样的方式感知 token 之间的顺序与距离关系。后续 Module 3 (Transformer) 中的 Self-Attention 机制将直接在这些嵌入向量之上进行运算，Module 5 (Attention 进阶) 中的 RoPE 和各种注意力变体也以嵌入层的输出为起点。
+
+```mermaid
+graph LR
+    M1["Module 1<br/>Tokenization<br/>文本 → Token ID"] --> M2["<strong>Module 2</strong><br/>Embedding<br/>Token ID → 连续向量"]
+    M2 --> M3["Module 3<br/>Transformer<br/>核心架构"]
+    M2 -.->|"位置编码基础"| M5["Module 5<br/>Attention 进阶<br/>RoPE / ALiBi 深入"]
+
+    style M2 fill:#4CAF50,color:#fff,stroke:#333,stroke-width:3px
+    style M1 fill:#e1f5fe,stroke:#333
+    style M3 fill:#e1f5fe,stroke:#333
+    style M5 fill:#fff3e0,stroke:#333,stroke-dasharray:5
+```
+
 ---
 
 ## 目录
@@ -724,7 +742,7 @@ class LearnablePositionalEmbedding(nn.Module):
     def __init__(self, max_seq_len: int, d_model: int):
         super().__init__()
         self.pos_embedding = nn.Embedding(max_seq_len, d_model)
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         seq_len = x.shape[1]
         positions = torch.arange(seq_len, device=x.device)
@@ -751,6 +769,104 @@ YaRN是对RoPE的改进，用于增强外推能力：
 $$\theta_i' = \theta_i \cdot s^{2(i-1)/d}$$
 
 其中 $s$ 是缩放因子。
+
+### 6.4 位置编码演进全景对比
+
+下表横向对比了主流位置编码方案的核心属性，帮助读者建立全局视角：
+
+| 方案 | 类型 | 是否需要学习 | 外推能力 | 计算开销 | 核心优势 | 核心劣势 | 代表模型 |
+|------|------|:----------:|:-------:|:-------:|---------|---------|---------|
+| **Sinusoidal** | 绝对 | 否 | 弱 | 极低 | 无参数、理论优雅 | 外推差、仅绝对位置 | Transformer (2017) |
+| **Learned** | 绝对 | 是 | 无 | 低 | 简单灵活 | 完全无法外推 | BERT, GPT-2 |
+| **T5 Relative Bias** | 相对 | 是（桶化） | 中等 | 中等（查表） | 精细的近距离区分 | 桶数固定、远距离粗糙 | T5 |
+| **RoPE** | 相对（旋转） | 否 | 强（需插值） | 低（逐元素乘法） | 数学优雅、相对位置自动编码 | 原始形式外推仍有限 | Llama, Gemma, PaLM, DeepSeek |
+| **ALiBi** | 相对（偏置） | 否 | 极强 | 极低（加法） | 天然外推、极简 | 线性衰减过于简单 | BLOOM, MPT |
+| **YaRN** | 相对（旋转+插值） | 否 | 极强 | 低 | 分频段处理，精细控制 | 需要额外超参数调节 | Yarn-Llama, DeepSeek-V2/V3 |
+
+**关键趋势**：从固定到可学习、从绝对到相对、从简单到多尺度。RoPE + YaRN 外推组合已成为当前 LLM 的事实标准。
+
+**注意力衰减模式对比**：
+
+不同位置编码方案的注意力权重随相对距离变化的衰减模式有本质差异：
+
+- **Sinusoidal / Learned**：无显式距离衰减，依赖模型自行学习
+- **ALiBi**：线性衰减 $-m \cdot |i-j|$，斜率固定，远距离快速衰减至零
+- **RoPE**：周期性衰减，高频维度快速振荡，低频维度缓慢变化
+- **YaRN**：对 RoPE 的衰减模式进行分频段修正，高频直接外推、低频插值缩放
+
+```mermaid
+graph LR
+    subgraph "注意力随距离衰减示意"
+        A["ALiBi: 线性衰减<br/>score ∝ -m·|i-j|"]
+        B["RoPE: 周期性衰减<br/>多频率叠加"]
+        C["YaRN: 修正的周期衰减<br/>高频保留 + 低频插值"]
+    end
+```
+
+---
+
+## 6.5 Embedding 维度选择的工程考量
+
+嵌入维度 $d_{model}$ 是 LLM 架构设计中最重要的超参数之一，它直接影响模型的**表达能力**、**计算效率**和**显存占用**三个维度。
+
+### 表达能力与维度的关系
+
+**理论视角**：
+
+根据 Johnson-Lindenstrauss 引理，将 $n$ 个点嵌入到 $d$ 维空间中，要保持点对距离的 $\epsilon$-近似，所需维度为：
+
+$$d \geq O\left(\frac{\log n}{\epsilon^2}\right)$$
+
+对于词汇表大小 $|V| = 128000$（如 Llama 3），理论下界约为 $\log(128000) / \epsilon^2$。但实际中由于 Superposition（参见 advanced.md），模型能在远小于理论需求的维度中编码大量语义特征。
+
+**经验观察**：
+
+嵌入维度越大，模型能编码的语义特征越多、越精细。但收益递减——从 512 增加到 1024 的提升远大于从 4096 增加到 8192。
+
+### 计算效率的影响
+
+嵌入维度直接影响整个模型的计算量：
+
+| 模块 | 计算复杂度 | $d_{model}$ 的影响 |
+|------|-----------|-------------------|
+| Embedding 查表 | $O(1)$ per token | 输出维度增大，后续计算增加 |
+| Self-Attention | $O(n^2 \cdot d)$ | 线性增加 |
+| FFN (标准) | $O(n \cdot d^2)$（因为 $d_{ff} = 4d$） | **平方增加** |
+| FFN (SwiGLU) | $O(n \cdot d^2)$（因为 $d_{ff} = \frac{8}{3}d$） | **平方增加** |
+
+FFN 层是计算的主要瓶颈，其 FLOPs 与 $d_{model}^2$ 成正比。因此 $d_{model}$ 翻倍意味着 FFN 计算量大约翻 4 倍。
+
+### 显存占用分析
+
+| 存储项 | 大小 | 典型占比 |
+|--------|------|---------|
+| 嵌入矩阵 $W_E$ | $|V| \times d_{model}$ | 10-25% |
+| 每层注意力参数 | $4 \times d_{model}^2$ | 与 $d^2$ 成正比 |
+| 每层 FFN 参数 | $\sim 8 d_{model}^2 / 3$ (SwiGLU) | 与 $d^2$ 成正比 |
+| KV Cache (推理) | $2 \times n_{layers} \times n \times d_{model}$ | 随序列长度线性增长 |
+
+对于大词汇表模型（如 Llama 3 的 128K 词汇），嵌入矩阵本身就占用大量显存：
+
+$$\text{嵌入矩阵显存(FP16)} = 128000 \times 4096 \times 2 \text{ bytes} \approx 1 \text{ GB}$$
+
+### 现代 LLM 的维度选择实践
+
+| 模型 | 参数量 | $d_{model}$ | $n_{heads}$ | $d_{head}$ | $d_{ff}$ |
+|------|--------|:-----------:|:-----------:|:----------:|:--------:|
+| GPT-2 Small | 117M | 768 | 12 | 64 | 3072 |
+| BERT-Large | 340M | 1024 | 16 | 64 | 4096 |
+| Llama 2 7B | 7B | 4096 | 32 | 128 | 11008 |
+| Llama 3 8B | 8B | 4096 | 32 | 128 | 14336 |
+| Gemma 2 9B | 9B | 3584 | 16 | 256 | 14336 |
+| DeepSeek-V2 | 236B (21B active) | 5120 | 128 | 128 | - (MoE) |
+| Llama 3 70B | 70B | 8192 | 64 | 128 | 28672 |
+
+**设计模式总结**：
+
+1. **头维度 $d_{head}$ 通常固定为 64 或 128**，通过增加头数来扩展 $d_{model}$
+2. **FFN 倍率**：标准为 $4\times$，SwiGLU 为 $\frac{8}{3}\times$（总参数量相当）
+3. **经验法则**：$d_{model}$ 大致与 $\sqrt{\text{参数量}}$ 成正比
+4. **Gemma 2 特殊设计**：使用较大的 $d_{head} = 256$，减少头数以降低 KV Cache 大小
 
 ---
 
@@ -1049,6 +1165,56 @@ graph TB
 
 ---
 
+### 项目5：位置编码可视化与注意力衰减模式对比（★★☆ 进阶）
+
+**目标**：通过可视化手段，直观理解不同位置编码方案的注意力衰减模式，建立对 Sinusoidal、RoPE、ALiBi、YaRN 的几何直觉。
+
+**任务**：
+1. 实现四种位置编码方案的注意力分数计算（使用随机初始化的 Q/K）
+2. 对每种方案，绘制**注意力权重 vs 相对距离**的衰减曲线
+   - 横轴：相对距离 $|i - j|$（从 0 到 max_seq_len）
+   - 纵轴：平均注意力权重（对多个随机 Q/K 取平均）
+3. 可视化 RoPE 的**频率谱**：不同维度对的旋转频率分布
+4. 对比 ALiBi 不同注意力头的斜率对注意力模式的影响
+5. 实验长度外推：在训练长度（如 512）之外（1024、2048、4096），观察各方案的注意力模式变化
+
+**实验设计**：
+
+```mermaid
+graph TB
+    subgraph "可视化维度"
+        V1["衰减曲线<br/>注意力 vs 相对距离"]
+        V2["热力图<br/>完整注意力矩阵"]
+        V3["频率谱<br/>RoPE 各维度的旋转频率"]
+        V4["外推对比<br/>训练长度内 vs 超出训练长度"]
+    end
+
+    subgraph "位置编码方案"
+        P1["Sinusoidal"]
+        P2["RoPE (base=10000)"]
+        P3["ALiBi (各头斜率)"]
+        P4["YaRN (NTK-Aware)"]
+    end
+
+    P1 --> V1
+    P2 --> V1
+    P3 --> V1
+    P4 --> V1
+    P1 --> V2
+    P2 --> V3
+    P3 --> V4
+    P4 --> V4
+```
+
+**提示**：
+- RoPE 的衰减模式不是单调的，而是多个不同频率的周期函数叠加——注意观察这一点
+- ALiBi 的不同头使用不同斜率，可以同时绘制多条衰减曲线以观察覆盖范围
+- 外推实验中，重点关注 RoPE 在超出训练长度后注意力模式是否"崩溃"，以及 YaRN 是否有效修复
+
+**预期产出**：4 种位置编码方案的可视化对比报告（含衰减曲线、热力图、频率谱）+ 长度外推分析。
+
+---
+
 ## 本章小结
 
 ### 核心知识点
@@ -1092,3 +1258,24 @@ graph TB
 ---
 
 **下一章预告**：[模块3: Transformer核心架构](../03_transformer/README.md) - 我们将深入Self-Attention的数学推导，实现完整的Transformer Block。
+
+---
+
+## 过渡：从嵌入到 Transformer
+
+到目前为止，我们已经理解了 LLM 的前两个核心步骤：
+
+1. **Module 1（Tokenization）**：将原始文本切分为 token，得到整数 ID 序列
+2. **Module 2（Embedding）**：将 token ID 映射为连续向量，并注入位置信息
+
+现在，每个 token 已经拥有了一个富含语义信息和位置信息的向量表示。但这些向量之间还是**独立的**——位置 $i$ 的向量不知道位置 $j$ 的内容。
+
+下一步，我们需要一种机制让这些向量**相互交流**，使每个位置都能"看到"整个序列的信息。这正是 **Transformer 的 Self-Attention 机制**所做的事情。
+
+在 Module 3 中，我们将：
+- 从数学上推导 Self-Attention 的计算过程
+- 理解 Multi-Head Attention 为何能捕捉多种语义关系
+- 实现完整的 Transformer Block（注意力 + FFN + 归一化 + 残差连接）
+- 探索 Google、DeepSeek、Anthropic 三条技术线在 Transformer 架构上的创新
+
+嵌入层为 Transformer 提供了**输入表示**，Transformer 则在这些表示之上构建**上下文理解能力**。两者的协同是现代 LLM 的基石。

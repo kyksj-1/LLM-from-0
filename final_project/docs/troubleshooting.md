@@ -14,6 +14,7 @@
 - [6. DPO 阶段问题](#6-dpo-阶段问题)
 - [7. 生成质量问题](#7-生成质量问题)
 - [8. 环境与依赖问题](#8-环境与依赖问题)
+- [9. 分布式训练常见问题（Version B）](#9-分布式训练常见问题version-b)
 
 ---
 
@@ -385,4 +386,66 @@ OOM? ────────── 是 → 梯度检查点 → 减小 batch →
 训练太慢? ──── 是 → 混合精度 → Flash Attention → 增大 batch
   ↓ 否
 生成质量差? ── 是 → 检查 checkpoint 加载 → 调整采样参数
+  ↓ 否
+分布式问题? ── 是 → 参考第 9 节
+```
+
+---
+
+## 9. 分布式训练常见问题（Version B）
+
+> 当你从 Version A（单卡）扩展到 Version B（多卡）时，会遇到一系列分布式训练特有的问题。本节针对使用 PyTorch FSDP/DDP 进行多卡训练的场景。
+
+### 9.1 NCCL All-Reduce 超时
+
+| | 内容 |
+|---|------|
+| **症状** | 训练 hang 住不动，最终报错 `NCCL timeout` 或 `RuntimeError: NCCL communicator was aborted`。日志可能显示某些 rank 已完成当前操作而其他 rank 仍在等待。 |
+| **诊断方法** | 1. 设置 `export NCCL_DEBUG=INFO` 查看详细通信日志；2. 检查 `nvidia-smi topo -m` 确认 GPU 互联拓扑（NVLink vs PCIe）；3. 用 `torch.distributed.barrier()` 在关键位置插入同步点，定位哪个操作导致挂起；4. 检查是否某个 rank 在 forward/backward 路径上走了不同的分支（导致集合通信不匹配）。 |
+| **解决方案** | 1. 增大超时时间: `torch.distributed.init_process_group(timeout=timedelta(minutes=30))`；2. 确保所有 rank 执行完全相同的计算图（禁止条件分支导致部分 rank 跳过通信操作）；3. 如果是网络问题，尝试 `export NCCL_SOCKET_IFNAME=eth0` 指定正确的网络接口；4. PCIe 互联的机器上可能需要 `export NCCL_P2P_DISABLE=1`。 |
+
+### 9.2 FSDP 与梯度检查点的兼容性问题
+
+| | 内容 |
+|---|------|
+| **症状** | 使用 FSDP + `torch.utils.checkpoint.checkpoint()` 时出现 `RuntimeError: Expected to mark a variable ready only once` 或显存没有按预期减少。 |
+| **诊断方法** | 1. 确认 FSDP wrapping 策略是否正确——每个 `TransformerBlock` 应该是一个独立的 FSDP unit；2. 检查 `checkpoint()` 函数的 `use_reentrant` 参数设置；3. 对比开启和关闭 checkpoint 时的峰值显存，确认 checkpoint 是否生效。 |
+| **解决方案** | 1. 在 PyTorch 2.0+ 中，推荐使用 `use_reentrant=False`（新版非重入式实现，兼容性更好）；2. FSDP wrap 的粒度要与 checkpoint 的粒度对齐——对每个被 FSDP wrap 的模块单独做 checkpoint；3. 确保 `checkpoint()` 包裹的函数没有 `torch.no_grad()` 上下文。 |
+
+### 9.3 多卡训练时 Loss 与单卡不一致
+
+| | 内容 |
+|---|------|
+| **症状** | 相同配置（总 batch size、学习率、数据）下，多卡训练的 loss 曲线与单卡显著不同，最终收敛结果也有差异。 |
+| **诊断方法** | 1. 检查 loss 是否在 All-Reduce 前正确除以了 `world_size`（DDP 默认会做 gradient averaging，但梯度累积时需要手动处理）；2. 确认所有 rank 是否看到了不同的数据（而非重复数据）；3. 检查有效 batch size 的计算是否正确: `effective_bs = micro_bs × grad_accum × n_gpus`。 |
+| **解决方案** | 1. 使用 `DistributedSampler` 确保数据在 rank 间无重叠；2. 如果使用梯度累积，loss 的 scaling 公式为 `loss = raw_loss / (grad_accum_steps)`（DDP 已经处理了跨卡平均）；3. 确保学习率的 warmup 和 decay 是按全局步数计算的，而非每个 rank 独立计算；4. 对比验证: 设 n_gpus=1 + grad_accum=4 与 n_gpus=4 + grad_accum=1 的 loss 应该接近。 |
+
+### 9.4 Checkpoint 保存时的 OOM
+
+| | 内容 |
+|---|------|
+| **症状** | 训练正常进行，但在保存 checkpoint 时某张卡 OOM 崩溃。这在使用 FSDP 时尤其常见。 |
+| **诊断方法** | 1. FSDP 的 `full_state_dict` 模式会将所有分片参数临时收集到 rank 0，导致 rank 0 的显存需求翻倍；2. 用 `torch.cuda.memory_summary()` 在保存前后对比显存状态；3. 检查是否同时保存了模型和优化器状态（优化器状态通常是模型参数的 2-3 倍）。 |
+| **解决方案** | 1. 使用 FSDP 的 `ShardedStateDictType.SHARDED_STATE_DICT`，每个 rank 只保存自己的分片，避免全量收集：<br>`with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT): torch.save(...)`；2. 如果必须保存完整 state_dict，在保存前调用 `torch.cuda.empty_cache()` 释放缓存；3. 分步保存: 先保存模型参数、释放显存，再保存优化器状态；4. 考虑使用 CPU offload 保存: `with FSDP.state_dict_type(..., offload_to_cpu=True):`。 |
+
+### 9.5 数据并行下的随机种子管理
+
+| | 内容 |
+|---|------|
+| **症状** | 多次训练结果完全不可复现；或者所有 rank 的数据增强/dropout 行为完全相同（丧失了随机性的多样性）。 |
+| **诊断方法** | 1. 检查每个 rank 的随机种子是否被显式设置；2. 打印各 rank 的 `torch.initial_seed()` 和 `numpy.random.get_state()` 确认是否相同；3. 验证 `DistributedSampler` 的 `seed` 参数是否一致，`epoch` 参数是否在每个 epoch 更新。 |
+| **解决方案** | 1. **全局一致性**: 模型初始化使用相同种子（所有 rank 种子相同），确保初始参数一致；2. **数据多样性**: 数据加载使用 `rank + base_seed` 作为种子，确保各卡看到不同数据顺序；3. **Dropout 多样性**: 通常不需要特殊处理（DDP/FSDP 下各卡的 dropout mask 天然不同）；4. **完整可复现性**: 保存 checkpoint 时同时保存所有 rank 的 RNG 状态 `torch.cuda.get_rng_state()`，恢复时逐卡加载。 |
+
+```python
+# 推荐的多卡随机种子设置
+def set_seed(base_seed: int, rank: int):
+    """设置随机种子，确保可复现性与多样性的平衡。"""
+    # 模型初始化: 所有 rank 使用相同种子
+    torch.manual_seed(base_seed)
+    # 数据加载: 各 rank 使用不同种子
+    torch.manual_seed(base_seed + rank)
+    np.random.seed(base_seed + rank)
+    random.seed(base_seed + rank)
+    # CUDA 随机数
+    torch.cuda.manual_seed_all(base_seed + rank)
 ```

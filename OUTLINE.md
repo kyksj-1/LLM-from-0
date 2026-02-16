@@ -142,11 +142,11 @@
 
 ```
 code/tokenization/
-├── bpe_tokenizer.py          # [已完成] BPE + ByteBPE 完整实现
-├── wordpiece_tokenizer.py    # WordPiece 算法实现
-├── unigram_tokenizer.py      # Unigram LM + Viterbi 解码实现
-├── tokenizer_comparison.py   # 各分词器的对比分析工具
-└── utils.py                  # 预分词、文本清洗等工具函数
+├── bpe_tokenizer.py          # ✅ BPE + ByteBPE 完整实现
+├── wordpiece_tokenizer.py    # ✅ WordPiece 算法实现（PMI合并策略）
+├── unigram_tokenizer.py      # ✅ Unigram LM + Viterbi 解码实现
+├── tokenizer_comparison.py   # ✅ 三种分词器对比分析工具
+└── utils.py                  # ✅ 预分词、文本清洗、字节操作等工具函数
 ```
 
 ### 项目实践
@@ -2318,7 +2318,7 @@ code/
 - `02_embedding/`: README.md(已更新) + advanced.md + `code/embedding/{word2vec,positional_encoding,visualize}.py`
 - `03_transformer/`: README.md(已更新) + advanced.md + `code/transformer/{attention,normalization,feedforward,block,model,__init__}.py`
 
-### 第二阶段: 编写新模块（4-16）⬅️ 当前阶段
+### 第二阶段: 编写新模块（4-16）✅ 已完成
 
 > **重要**: 本阶段开启新会话执行。以下是给新会话的完整上下文。
 
@@ -2486,12 +2486,14 @@ code/{module}/
 - `code/sft/lora.py` — Batch 3 代码范例（LoRA从零实现+数学验证）
 - `code/dpo/dpo_loss.py` — Batch 3 代码范例（DPO损失+完整推导注释）
 
-### 第三阶段: 终极项目
+### 第三阶段: 终极项目 ✅ 已完成
 
-- 在模块 4-16 全部完成后执行
-- 两个子代理分别完成 Version A（300M 单GPU）和 Version B（1B 多GPU）
-- 终极项目代码框架提供关键逻辑留空的脚手架，学生整合前面模块知识来填充
-- 整合测试与文档
+- `final_project/` 目录包含完整的代码框架（27个文件）
+- README.md: 项目指南（知识串联图 + 7阶段实施路线图）
+- configs/: 300M 和 1B 模型配置（YAML + 详细注释）
+- src/: 代码骨架（config.py 完整提供 + 16个 TODO 骨架文件）
+- scripts/: 6个入口脚本骨架
+- docs/: 训练指南 + 排错手册 + 扩展指南
 
 ---
 
@@ -2502,6 +2504,10 @@ code/{module}/
 - Phase 2 批次 3（模块 10, 11, 12）: ✅ 已完成 — 29 文件
 - Phase 2 批次 4（模块 13, 14, 15, 16）: ✅ 已完成 — 34 文件
 - **Phase 2 全部完成！** 模块 4-16 共 132 文件
-- Phase 3（终极项目）: ⬅️ 下一阶段
+- Phase 3（终极项目）: ✅ 已完成 — 27 文件
+- Phase 4（内容增强）: ✅ 已完成 — 全 17 模块增强，+9,160 行（PR #7）
+  - 每模块新增：章节定位 Mermaid 图、前后衔接导读、工业实践案例、项目练习补充
+  - code/tokenization/ 补全：wordpiece/unigram/comparison/utils 4 文件
+  - 根 README.md 新增全局知识依赖图
 
 *最后更新: 2026-02-15*

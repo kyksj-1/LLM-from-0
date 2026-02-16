@@ -2,6 +2,28 @@
 
 > Transformer是现代LLM的基石。本章将深入Self-Attention的数学原理，逐层构建完整的Transformer Block，并实现工业级的代码。
 
+### 本章定位
+
+Transformer 是整个 LLM 技术栈的**基石架构**。自 2017 年 Vaswani 等人提出以来，Transformer 已经彻底改变了自然语言处理乃至整个深度学习领域的格局。现代所有主流 LLM（GPT、Llama、Gemma、DeepSeek、Claude）都构建在 Transformer 架构之上。
+
+从数据流的角度看，Module 2 的嵌入层将离散 token 映射为连续向量后，这些向量需要一种机制来实现**上下文信息的交互与融合**——这正是 Transformer 所完成的核心任务。Transformer Block 由 Self-Attention（信息交互）和 Feed-Forward Network（信息变换）两个子模块交替堆叠而成，通过残差连接和归一化层保持训练稳定性。
+
+本章是后续多个模块的基础：Module 4（Decoder-only 架构族）将讨论如何将 Transformer 组织为自回归生成模型；Module 5（Attention 进阶）将深入探讨注意力机制的变体与优化；Module 6（MoE）将探索如何用混合专家替换标准 FFN 层。
+
+```mermaid
+graph LR
+    M2["Module 2<br/>Embedding<br/>Token → 向量"] --> M3["<strong>Module 3</strong><br/>Transformer<br/>核心架构"]
+    M3 --> M4["Module 4<br/>Decoder-Only<br/>GPT/Llama 架构"]
+    M3 --> M5["Module 5<br/>Attention 进阶<br/>GQA/MQA/Flash"]
+    M3 --> M6["Module 6<br/>MoE<br/>混合专家"]
+
+    style M3 fill:#4CAF50,color:#fff,stroke:#333,stroke-width:3px
+    style M2 fill:#e1f5fe,stroke:#333
+    style M4 fill:#e1f5fe,stroke:#333
+    style M5 fill:#e1f5fe,stroke:#333
+    style M6 fill:#e1f5fe,stroke:#333
+```
+
 ---
 
 ## 目录
@@ -111,7 +133,78 @@ $$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)
 
 **瓶颈**：$O(n^2)$ 的空间复杂度（存储注意力矩阵）。
 
-### 1.4 因果注意力
+### 1.4 Transformer 的完整计算复杂度分析
+
+在分析完 Self-Attention 的计算开销后，有必要将视角扩展到**整个 Transformer Block**，理解不同组件在不同序列长度下的计算瓶颈。
+
+#### Self-Attention vs FFN 的计算量对比
+
+一个完整的 Transformer Block 包含两个主要计算模块：
+
+**Self-Attention 层**：
+
+| 操作 | FLOPs | 说明 |
+|------|-------|------|
+| $Q = XW_Q$ | $2nd^2$ | 线性投影 |
+| $K = XW_K$ | $2nd^2$ | 线性投影 |
+| $V = XW_V$ | $2nd^2$ | 线性投影 |
+| $QK^T$ | $2n^2d$ | 注意力分数 |
+| $\text{softmax}(A)V$ | $2n^2d$ | 加权求和 |
+| $W_O$ 投影 | $2nd^2$ | 输出投影 |
+| **总计** | $8nd^2 + 4n^2d$ | |
+
+**FFN 层（标准 4x）**：
+
+| 操作 | FLOPs | 说明 |
+|------|-------|------|
+| $W_1$ 投影 | $2n \cdot d \cdot 4d = 8nd^2$ | 上投影 |
+| $W_2$ 投影 | $2n \cdot 4d \cdot d = 8nd^2$ | 下投影 |
+| **总计** | $16nd^2$ | |
+
+**FFN 层（SwiGLU $\frac{8}{3}x$）**：
+
+| 操作 | FLOPs | 说明 |
+|------|-------|------|
+| $W_{gate}$ 投影 | $2n \cdot d \cdot \frac{8d}{3} = \frac{16nd^2}{3}$ | 门控 |
+| $W_{up}$ 投影 | $\frac{16nd^2}{3}$ | 上投影 |
+| $W_{down}$ 投影 | $\frac{16nd^2}{3}$ | 下投影 |
+| **总计** | $16nd^2$ | 与标准 FFN 相当 |
+
+#### 关键观察：序列长度决定瓶颈
+
+将 Attention 和 FFN 的 FLOPs 合并：
+
+$$\text{FLOPs}_{\text{total}} = \underbrace{8nd^2 + 4n^2d}_{\text{Attention}} + \underbrace{16nd^2}_{\text{FFN}} = 24nd^2 + 4n^2d$$
+
+令 Attention 的 $O(n^2d)$ 部分等于 FFN 的 $O(nd^2)$ 部分，得到交叉点：
+
+$$4n^2d = 16nd^2 \implies n = 4d$$
+
+**临界序列长度** $n^* = 4d$：
+
+| 模型 | $d_{model}$ | 临界长度 $n^* = 4d$ | 含义 |
+|------|:-----------:|:------------------:|------|
+| GPT-2 Small | 768 | 3,072 | 大部分场景 FFN 主导 |
+| Llama 2 7B | 4,096 | 16,384 | 16K 以下 FFN 主导 |
+| Llama 3 70B | 8,192 | 32,768 | 32K 以下 FFN 主导 |
+
+**核心结论**：
+
+- 当 $n < 4d$ 时（大多数实际场景）：**FFN 是计算瓶颈**，占约 $2/3$ 的总 FLOPs
+- 当 $n > 4d$ 时（超长序列场景）：**Attention 成为瓶颈**，$O(n^2)$ 项主导
+- 这解释了为什么短序列优化应关注 FFN（如 MoE 稀疏化），长序列优化应关注 Attention（如 Flash Attention、线性注意力）
+
+```mermaid
+graph TB
+    subgraph "计算瓶颈随序列长度变化"
+        A["短序列 (n < 4d)<br/>FFN 主导 ≈ 67%<br/>→ MoE 稀疏化有效"]
+        B["临界点 (n = 4d)<br/>Attention ≈ FFN<br/>→ 两者均需优化"]
+        C["长序列 (n > 4d)<br/>Attention 主导<br/>→ Flash Attention / 线性注意力"]
+    end
+    A --> B --> C
+```
+
+### 1.5 因果注意力
 
 对于Decoder-only模型，需要防止"看到未来"：
 
@@ -458,6 +551,83 @@ graph TB
 1. **梯度流动更稳定**：梯度可以直接流向浅层
 2. **训练更稳定**：不需要warmup
 3. **被Llama、Gemma、DeepSeek采用**
+
+### 3.6 Layer Normalization 变体全面对比
+
+除了 Pre-Norm 和 Post-Norm 的位置选择，归一化方法本身也有多种变体。以下系统对比四种主流方案。
+
+#### Post-LN（原始 Transformer）
+
+$$x_{l+1} = \text{LN}(x_l + \text{SubLayer}(x_l))$$
+
+**数学性质**：
+- 归一化作用在残差连接之后
+- 输出被归一化到均值为0、方差为1的分布
+- 深层网络中，残差路径上的信号可能不稳定
+
+**训练特性**：
+- 需要 Learning Rate Warmup 来稳定初期训练
+- 深层模型（>12层）容易出现梯度消失
+- 但在收敛后性能可能略优于 Pre-LN（因为归一化更充分）
+
+#### Pre-LN（现代 LLM 主流）
+
+$$x_{l+1} = x_l + \text{SubLayer}(\text{LN}(x_l))$$
+
+**数学性质**：
+- 残差路径上没有归一化操作，梯度可以**无损传递**到最底层
+- 等价于在恒等映射上叠加扰动
+
+**训练特性**：
+- 无需 Warmup
+- 深层模型训练稳定
+- 可能存在"表示退化"问题：残差流的范数随层数增长
+
+#### RMSNorm
+
+$$\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{j=1}^{d} x_j^2 + \epsilon}} \cdot \gamma$$
+
+**与 LayerNorm 的关键区别**：
+- 去掉了**均值中心化**步骤（不减去均值）
+- 去掉了**偏移参数** $\beta$（只保留缩放 $\gamma$）
+
+**计算优势**：
+
+| 操作 | LayerNorm | RMSNorm | 节省 |
+|------|:---------:|:-------:|:----:|
+| 均值计算 | $O(d)$ | 不需要 | $O(d)$ |
+| 方差计算 | $O(d)$ | 不需要 | $O(d)$ |
+| RMS 计算 | 不需要 | $O(d)$ | - |
+| 可学习参数 | $2d$（$\gamma, \beta$） | $d$（$\gamma$） | $d$ |
+| **总计** | $3O(d) + 2d$ 参数 | $2O(d) + d$ 参数 | ~33% |
+
+**为什么去掉均值有效？**
+
+Zhang & Sennrich (2019) 的研究表明：LayerNorm 的成功主要归功于**缩放不变性**（re-scaling invariance），而非**重新中心化**（re-centering）。RMSNorm 保留了缩放不变性，去掉了对效果贡献较小的均值中心化。
+
+#### DeepNorm
+
+DeepNorm（Microsoft, 2022）是为**超深 Transformer**（1000+层）设计的归一化方案：
+
+$$x_{l+1} = \text{LN}(\alpha \cdot x_l + \text{SubLayer}(x_l))$$
+
+**关键设计**：
+- 在残差连接中引入缩放因子 $\alpha > 1$，放大残差路径
+- 配合特殊的初始化：$W \sim \mathcal{N}(0, \beta^2)$，其中 $\beta < 1$
+- $\alpha$ 和 $\beta$ 的选择：$\alpha = (2N)^{1/4}$, $\beta = (8N)^{-1/4}$（$N$ 为层数）
+
+**效果**：使得 1000+ 层的 Transformer 可以稳定训练，而标准 Pre-LN 在数百层时就可能出现问题。
+
+#### 四种方案的全面对比
+
+| 方案 | 训练稳定性 | 最终性能 | 计算开销 | 最大可训练深度 | 代表模型 |
+|------|:---------:|:-------:|:-------:|:------------:|---------|
+| Post-LN | 较差（需 Warmup） | 较好 | 中等 | ~12 层 | 原始 Transformer |
+| Pre-LN | 好 | 略低于 Post-LN | 中等 | ~100 层 | GPT-3 |
+| Pre-RMSNorm | 好 | 与 Pre-LN 相当 | **低** | ~100 层 | Llama, Gemma, DeepSeek |
+| DeepNorm | 极好 | 好 | 中等 | **1000+ 层** | DeepNet |
+
+**现代 LLM 的共识选择**：**Pre-RMSNorm**（Pre-Norm 位置 + RMSNorm 方法）。这是 Llama 系列、Gemma、DeepSeek 等几乎所有主流开源 LLM 的标准配置。
 
 ---
 
@@ -1228,6 +1398,74 @@ class GeGLU(nn.Module):
 
 ---
 
+### 项目5：LayerNorm 变体实验——归一化方法对训练稳定性的影响（★★☆ 进阶）
+
+**目标**：实现并对比 Post-LN、Pre-LN、Pre-RMSNorm 三种归一化配置，通过定量实验理解归一化方法和位置对训练稳定性的影响。
+
+**任务**：
+1. 实现三种归一化配置的 `TransformerBlock`：
+   - `PostLNBlock`：Post-Norm + LayerNorm
+   - `PreLNBlock`：Pre-Norm + LayerNorm
+   - `PreRMSNormBlock`：Pre-Norm + RMSNorm
+2. 搭建小型语言模型（6层，d_model=256，4头），在相同数据上训练
+3. 记录训练过程中的关键指标：
+   - 每层的梯度范数（L2 Norm）
+   - 训练 Loss 曲线
+   - 前向传播中每层输出的范数
+4. 对比三种配置在**有/无 Learning Rate Warmup** 下的表现
+5. 扩展实验：将模型深度增加到 12 层和 24 层，观察 Post-LN 是否出现训练崩溃
+
+**实验矩阵**：
+
+```mermaid
+graph TB
+    subgraph "控制变量"
+        A["归一化方法: Post-LN / Pre-LN / Pre-RMSNorm"]
+        B["模型深度: 6层 / 12层 / 24层"]
+        C["Warmup: 有 (1000步) / 无"]
+    end
+
+    subgraph "观测指标"
+        D["训练 Loss 曲线"]
+        E["各层梯度范数分布"]
+        F["各层输出范数分布"]
+        G["训练是否崩溃 (NaN/Inf)"]
+    end
+
+    A --> D
+    B --> E
+    C --> F
+```
+
+**关键代码片段**：
+
+```python
+# 梯度范数记录钩子
+def register_gradient_hooks(model):
+    """注册梯度钩子，记录各层的梯度范数"""
+    grad_norms = {}
+    for name, param in model.named_parameters():
+        if 'weight' in name:
+            def hook(grad, name=name):
+                grad_norms[name] = grad.norm().item()
+            param.register_hook(hook)
+    return grad_norms
+```
+
+**分析方向**：
+- Post-LN 在深层模型中的梯度范数是否呈指数衰减（梯度消失）？
+- Pre-LN 的梯度范数在各层间是否更均匀？
+- RMSNorm 相比 LayerNorm 的速度提升有多大（wall-clock time）？
+- 去掉 Warmup 后，哪种配置仍能稳定训练？
+
+**预期发现**：
+- Post-LN + 无 Warmup 在 12+ 层时大概率训练崩溃
+- Pre-LN 和 Pre-RMSNorm 的梯度范数在各层间更加均匀
+- RMSNorm 的前向 + 反向速度比 LayerNorm 快约 10-30%
+- 三种方法在 6 层浅模型上性能差异不大，深层差异明显
+
+---
+
 ## 本章小结
 
 ### 核心知识点
@@ -1277,3 +1515,25 @@ class GeGLU(nn.Module):
 ---
 
 **下一章预告**：[模块4: Decoder-only架构族](../04_decoder_only/README.md) - 深入GPT、Llama架构设计，理解现代LLM的演进。
+
+---
+
+## 过渡：从 Transformer 到 Decoder-only 架构
+
+至此，我们已经完整地理解了 Transformer 的核心组件：
+
+1. **Self-Attention**：让每个 token 能"看到"序列中的所有其他 token
+2. **Multi-Head Attention**：通过多头机制捕捉多种语义关系
+3. **Feed-Forward Network**：对每个位置的表示进行非线性变换
+4. **Layer Normalization**：Pre-RMSNorm 配置保证训练稳定性
+5. **残差连接**：允许梯度直接流向浅层
+
+但 Transformer 本身只是一个"积木"。一个完整的 LLM 还需要回答以下问题：
+
+- **如何组织这些积木？** 原始 Transformer 使用 Encoder-Decoder 架构，但现代 LLM 几乎都采用 **Decoder-only** 架构。为什么？
+- **因果掩码的深层含义是什么？** 我们在 1.5 节介绍了因果注意力，但它对模型能力和训练效率的影响远不止于此。
+- **GPT、Llama、Gemma 的具体架构差异在哪？** 它们都是 Decoder-only，但细节设计各有取舍。
+
+在 Module 4 中，我们将从 GPT 系列出发，逐步理解 Decoder-only 架构的设计哲学、训练目标（Next Token Prediction）以及 Llama、Gemma 等现代模型的具体实现。
+
+同时，Module 5 将深入 Attention 的变体（GQA、MQA、Flash Attention），Module 6 将探索用 MoE 替换 FFN 的稀疏化设计。这三个模块从不同维度对 Transformer 进行扩展和优化，构成了现代 LLM 架构的完整图景。

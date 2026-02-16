@@ -4,6 +4,30 @@
 
 ---
 
+## 章节定位
+
+本模块是预训练三部曲的第二部分。在模块 8A 回答了"模型应该学什么"（预训练目标）之后，本模块回答另一个核心问题：**给定有限的计算预算，应该训练多大的模型、在多少数据上训练？**
+
+```mermaid
+graph LR
+    M8A["模块 8A<br/>预训练目标<br/><i>模型学什么？</i><br/>✅ 已完成"] --> M8B["<b>模块 8B</b><br/>Scaling Laws<br/><i>花多少资源？</i>"]
+    M8B --> M8C["模块 8C<br/>训练工程<br/><i>怎么高效训练？</i>"]
+    M8C --> M9["模块 9<br/>分布式训练<br/><i>怎么多卡并行？</i>"]
+
+    style M8B fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px
+    style M8A fill:#e8f5e9,stroke:#66bb6a
+    style M8C fill:#e3f2fd
+    style M9 fill:#e3f2fd
+```
+
+**学完本模块后，你将能够回答**：
+- Kaplan 和 Chinchilla 的 Scaling Laws 有什么区别？为什么 Chinchilla 修正了 Kaplan？
+- 给定 $10^{22}$ FLOPs 的预算，最优的模型参数量和训练数据量分别是多少？
+- Llama 3 为什么选择"过度训练"小模型？什么时候应该偏离 Chinchilla 最优？
+- "涌现能力"是真实的相变，还是度量选择造成的假象？
+
+---
+
 ## 目录
 
 - [1. Scaling Laws 基础：幂律关系](#1-scaling-laws-基础幂律关系)
@@ -14,8 +38,9 @@
 - [6. 涌现能力与相变](#6-涌现能力与相变)
 - [7. 计算最优配置的工程实践](#7-计算最优配置的工程实践)
 - [8. 三条技术线对比](#8-三条技术线对比)
-- [9. 项目实践](#9-项目实践)
-- [10. 本章小结](#10-本章小结)
+- [9. 超越 Chinchilla：最新 Scaling 研究](#9-超越-chinchilla最新-scaling-研究)
+- [10. 项目实践](#10-项目实践)
+- [11. 本章小结](#11-本章小结)
 
 ---
 
@@ -808,7 +833,79 @@ Anthropic 在 Scaling Laws 研究方面有独特贡献：
 
 ---
 
-## 9. 项目实践
+## 9. 超越 Chinchilla：最新 Scaling 研究
+
+Chinchilla (2022) 建立了 "模型-数据等比扩展" 的基准认知，但 2023-2025 年的实践表明，**Chinchilla 最优只是故事的开始**。本节讨论工业界如何在 Chinchilla 的基础上进一步优化策略。
+
+### 9.1 Llama 的"过训练"策略：推理效率优先
+
+Meta 的 Llama 系列是"有意偏离 Chinchilla 最优"的典范。其核心逻辑是：
+
+> **训练是一次性投资，推理是持续性支出。为了降低推理成本，值得在训练阶段多花钱。**
+
+Llama 3 的具体做法（回顾第 4 节）：
+
+| 模型 | Chinchilla 最优 tokens | 实际训练 tokens | 过训练倍数 | 动机 |
+|------|---------------------|---------------|-----------|------|
+| Llama 3 8B | ~160B | 15T | 94x | 边缘部署、低延迟推理 |
+| Llama 3 70B | ~1.4T | 15T | 11x | API 服务，降低单请求成本 |
+| Llama 3 405B | ~8.1T | 15T | 1.9x | 旗舰能力模型 |
+
+**关键发现**：即使过训练 94 倍，8B 模型的 loss 仍在持续（缓慢）下降。这意味着 Scaling Laws 中的数据项 $B/D^\beta$ 在 Chinchilla 最优之后仍有改善空间，只是边际收益递减。
+
+**实践启示**：如果你的模型需要大规模部署（>10M 请求/天），优先考虑过训练较小模型，而非直接训练 Chinchilla 最优的大模型。
+
+### 9.2 DeepSeek 的 Scaling Law 研究：预测 MoE 模型的最优配置
+
+DeepSeek 在 MoE Scaling Laws 上的贡献是独特的。传统 Scaling Laws（Kaplan、Chinchilla）都是针对稠密模型的，MoE 模型引入了新的自由度：
+
+$$L_{\text{MoE}}(N_{\text{active}}, N_{\text{total}}, E, D) = \frac{A}{N_{\text{active}}^{\alpha}} \cdot g(N_{\text{total}} / N_{\text{active}}) + \frac{B}{D^{\beta}} + E_0$$
+
+其中 $g(\cdot)$ 是一个描述"总参数相对于活跃参数的增益"的函数。DeepSeek 通过系统实验拟合了这个函数的具体形式。
+
+**关键发现**：
+1. **MoE 的有效参数量约为活跃参数的 2-3 倍**：一个 37B 活跃参数的 MoE 模型性能大致等效于 74B-111B 的稠密模型
+2. **更细粒度的专家更优**：在固定总参数的前提下，256 个小专家优于 16 个大专家
+3. **MoE 的数据需求与稠密模型类似**：以活跃参数为基准，$D_{\text{opt}} \approx 20 N_{\text{active}}$ 仍然近似成立
+
+### 9.3 Inference-time Compute Scaling：不只是训练时 Scale
+
+2024 年最重要的 Scaling 新范式是**推理时计算 Scaling**。核心发现是：
+
+$$\text{Performance} \propto C_{\text{train}}^{\alpha_1} \cdot C_{\text{inference}}^{\alpha_2}$$
+
+模型性能不仅由训练计算量决定，还可以通过在推理时投入更多计算来提升。代表工作包括：
+
+- **OpenAI o1/o3**：通过"思考更长时间"（生成更长的推理链）来提升推理能力
+- **DeepSeek-R1**：用强化学习训练模型学会"何时该多想想"
+- **Google Gemini 2.0**：结合 Tree-of-Thought 搜索
+
+**与训练 Scaling 的权衡**：
+
+| 维度 | 训练 Scaling | 推理 Scaling |
+|------|------------|------------|
+| 成本类型 | 一次性 | 持续性（按请求计费） |
+| 提升的能力 | 基础能力（知识、语言） | 特定任务表现（推理、数学） |
+| 适用场景 | 通用能力提升 | 困难推理任务 |
+| 边际成本 | 训练完即固定 | 每次请求都花费 |
+
+> 这一话题将在模块 13（思维链与推理增强）中深入展开。
+
+### 9.4 Scaling Law 的局限性：不是所有能力都遵循幂律
+
+Scaling Laws 给出了令人安心的可预测性，但需要谨慎对待其局限：
+
+**1. 涌现能力的争论**（详见第 6 节）：某些能力（如 few-shot 数学推理）似乎在特定规模阈值处突然出现，不遵循平滑的幂律。虽然有证据表明这可能是度量选择的假象，但争论尚未定论。
+
+**2. 下游任务性能 ≠ 预训练 loss**：Scaling Laws 主要描述预训练 loss 的缩放行为。从 loss 到下游 benchmark 的映射是非线性的，不同任务的映射函数不同。
+
+**3. 数据质量打破幂律**：Microsoft Phi 系列证明，高质量合成数据可以显著"左移"Scaling 曲线——用远小于 Scaling Laws 预测的模型规模达到同等性能。这意味着数据质量是一个在标准 Scaling Laws 中未充分建模的变量。
+
+**4. 架构创新可以改变指数**：MoE、GQA、Flash Attention 等架构创新改变了"等效计算量"的概念，使得单纯用参数量或 FLOPs 描述的 Scaling Laws 不再完全准确。
+
+---
+
+## 10. 项目实践
 
 ### 项目 1：在小模型上拟合自己的 Scaling Laws 曲线 (⭐⭐)
 
@@ -1027,7 +1124,72 @@ for k in [1, 5, 10, 20]:
 
 ---
 
-## 10. 本章小结
+### 项目 5：验证 Chinchilla Scaling Law (⭐⭐ 进阶)
+
+**目标**：在极小规模上验证 Scaling Law 的基本趋势，培养对幂律关系的直观理解。
+
+**实验设计**：
+
+1. 选择一个小型文本数据集（如 TinyStories 或 WikiText-2）
+2. 训练多个不同参数量的模型（1M, 5M, 20M），每个模型在不同数据量上训练
+3. 画出 loss 随参数量/数据量变化的曲线，验证是否呈现幂律关系
+4. 尝试验证 Chinchilla 的 $D_{\text{opt}} \approx 20N$ 关系
+
+**具体步骤**：
+
+**Step 1: 构建模型规模梯度**
+
+| 模型编号 | 参数量 | 层数 | 隐藏维度 | 头数 |
+|---------|--------|------|---------|------|
+| M1 | ~1M | 2 | 64 | 2 |
+| M2 | ~5M | 4 | 128 | 4 |
+| M3 | ~20M | 6 | 256 | 4 |
+
+**Step 2: 构建数据量梯度**
+
+对每个模型，分别在以下数据量上训练至收敛：
+- 5M, 10M, 20M, 50M, 100M, 200M tokens
+
+**Step 3: 收集数据并拟合**
+
+```python
+import numpy as np
+from scipy.optimize import curve_fit
+
+# Chinchilla 损失模型
+def chinchilla_loss(X, A, alpha, B, beta, E):
+    """L(N, D) = A/N^alpha + B/D^beta + E"""
+    N, D = X
+    return A / np.power(N, alpha) + B / np.power(D, beta) + E
+
+# 实验数据: (参数量, 数据量, 最终loss)
+# 需要你自己通过实验填充
+N_values = np.array([1e6, 1e6, 1e6, 5e6, 5e6, 5e6, 20e6, 20e6, 20e6])
+D_values = np.array([5e6, 50e6, 200e6, 5e6, 50e6, 200e6, 5e6, 50e6, 200e6])
+losses = np.array([...])  # 实验中测量得到
+
+# 拟合 Chinchilla 损失模型
+popt, pcov = curve_fit(
+    chinchilla_loss, (N_values, D_values), losses,
+    p0=[400, 0.34, 400, 0.28, 1.7],
+    bounds=([0, 0, 0, 0, 0], [np.inf, 1, np.inf, 1, 10])
+)
+print(f"拟合结果: A={popt[0]:.2f}, alpha={popt[1]:.3f}, "
+      f"B={popt[2]:.2f}, beta={popt[3]:.3f}, E={popt[4]:.3f}")
+```
+
+**Step 4: 绘制 Iso-FLOPs 曲线**
+
+对每个固定的 FLOPs 预算（$C = 6ND$），画出 loss 随 N 变化的曲线，找到每条曲线的最低点。
+
+**思考题**：
+- 你拟合得到的 $\alpha$ 和 $\beta$ 值与 Chinchilla 论文的值（0.34 和 0.28）接近吗？如果不接近，可能是什么原因？
+- 小规模实验（1M-20M 参数）的 Scaling Law 能否外推到更大的规模？有什么风险？
+- 如果增大数据量但模型参数不变，loss 会无限下降吗？$E$ 项的物理含义是什么？
+
+---
+
+## 11. 本章小结
 
 ### 核心知识点
 
@@ -1071,3 +1233,7 @@ graph TB
 - [4] Schaeffer et al. (2023). "Are Emergent Abilities of Large Language Models a Mirage?" arXiv:2304.15004
 - [5] Yang et al. (2022). "Tensor Programs V: Tuning Large Neural Networks via Zero-Shot Hyperparameter Transfer." arXiv:2203.03466 (muP)
 - [6] DeepSeek-AI (2024). "DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model."
+
+### 从 Scaling Laws 到训练工程
+
+本章回答了"花多少资源、怎么分配"的问题。知道了最优的模型大小和数据量之后，下一个关键问题是：**如何高效、稳定地完成这么大规模的训练？** [模块 8C：训练工程](../08c_training_engineering/README.md) 将深入讲解优化器选择、学习率调度、权重初始化、训练稳定性保障、断点续训等核心工程组件——这些是将 Scaling Laws 的理论指导转化为实际训练成果的关键环节。
